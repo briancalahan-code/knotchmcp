@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+import httpx
+
+BASE_URL = "https://api.hubapi.com"
+TIMEOUT = 10.0
+
+CONTACT_PROPERTIES = [
+    "firstname",
+    "lastname",
+    "email",
+    "jobtitle",
+    "phone",
+    "hs_linkedin_url",
+    "city",
+    "state",
+    "country",
+    "company",
+]
+
+
+class HubSpotClient:
+    def __init__(self, access_token: str, portal_id: str):
+        self._portal_id = portal_id
+        self._client = httpx.AsyncClient(
+            base_url=BASE_URL,
+            timeout=TIMEOUT,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+    async def _search(
+        self,
+        object_type: str,
+        filters: list[dict],
+        properties: list[str] | None = None,
+    ) -> list[dict]:
+        body: dict = {
+            "filterGroups": [{"filters": filters}],
+            "limit": 10,
+        }
+        if properties:
+            body["properties"] = properties
+        resp = await self._client.post(
+            f"/crm/v3/objects/{object_type}/search", json=body
+        )
+        resp.raise_for_status()
+        return resp.json().get("results", [])
+
+    async def search_contacts_by_email(self, email: str) -> list[dict]:
+        return await self._search(
+            "contacts",
+            [{"propertyName": "email", "operator": "EQ", "value": email}],
+            properties=CONTACT_PROPERTIES,
+        )
+
+    async def search_contacts_by_linkedin(self, linkedin_url: str) -> list[dict]:
+        return await self._search(
+            "contacts",
+            [
+                {
+                    "propertyName": "hs_linkedin_url",
+                    "operator": "EQ",
+                    "value": linkedin_url,
+                }
+            ],
+            properties=CONTACT_PROPERTIES,
+        )
+
+    async def get_contact(self, contact_id: str) -> dict:
+        resp = await self._client.get(
+            f"/crm/v3/objects/contacts/{contact_id}",
+            params={"properties": ",".join(CONTACT_PROPERTIES)},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def create_contact(self, properties: dict) -> dict:
+        resp = await self._client.post(
+            "/crm/v3/objects/contacts", json={"properties": properties}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def update_contact(self, contact_id: str, properties: dict) -> dict:
+        resp = await self._client.patch(
+            f"/crm/v3/objects/contacts/{contact_id}",
+            json={"properties": properties},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def search_companies_by_domain(self, domain: str) -> list[dict]:
+        return await self._search(
+            "companies",
+            [{"propertyName": "domain", "operator": "EQ", "value": domain}],
+            properties=["name", "domain"],
+        )
+
+    async def associate_contact_to_company(
+        self, contact_id: str, company_id: str
+    ) -> None:
+        resp = await self._client.put(
+            f"/crm/v3/objects/contacts/{contact_id}/associations/companies/{company_id}/default"
+        )
+        resp.raise_for_status()
+
+    def build_contact_url(self, contact_id: str) -> str:
+        return (
+            f"https://app.hubspot.com/contacts/{self._portal_id}/contact/{contact_id}"
+        )
+
+    async def close(self) -> None:
+        await self._client.aclose()
