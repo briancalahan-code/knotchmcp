@@ -320,6 +320,11 @@ async def _enrich_contact(
         first = props.get("firstname", "")
         last = props.get("lastname", "")
         domain = props.get("company", "")
+        linkedin = (
+            filled.get("hs_linkedin_url")
+            or props.get("hs_linkedin_url")
+            or (person.get("linkedin_url") if person else None)
+        )
 
         if first and last and domain:
             clay_result = await clay.enrich_contact(
@@ -327,6 +332,7 @@ async def _enrich_contact(
                 last_name=last,
                 company_domain=domain,
                 requested_data=[f for f in still_missing if f in ("email", "phone")],
+                linkedin_url=linkedin,
             )
             log_ctx.add_api_call("clay")
 
@@ -442,6 +448,7 @@ async def _clay_enrich(
     company_domain: str,
     requested_data: list[str],
     clay: ClayClient,
+    linkedin_url: str | None = None,
 ) -> ClayEnrichResult:
     """Enrich a contact via Clay webhook with configurable data points."""
     log_ctx = ToolLogContext("clay_enrich")
@@ -459,6 +466,7 @@ async def _clay_enrich(
         last_name=last_name,
         company_domain=company_domain,
         requested_data=[d for d in requested_data if d in ("email", "phone")],
+        linkedin_url=linkedin_url,
     )
     log_ctx.add_api_call("clay")
 

@@ -133,10 +133,13 @@ async def clay_enrich(
     last_name: str,
     company_domain: str,
     requested_data: list[str] | None = None,
+    linkedin_url: str | None = None,
 ) -> dict:
     """Enrich a contact using Clay. Use this as a follow-up when Apollo didn't
-    return phone, email, or other data. requested_data options: phone, email,
-    work_history. Consumes Clay credits."""
+    return phone, email, or other data. requested_data options: phone, email.
+    Pass linkedin_url if available — Clay uses it for phone lookup. Consumes Clay credits."""
     data = requested_data or ["phone", "email"]
-    result = await _clay_enrich(first_name, last_name, company_domain, data, _clay)
+    result = await _clay_enrich(
+        first_name, last_name, company_domain, data, _clay, linkedin_url=linkedin_url
+    )
     return result.model_dump()

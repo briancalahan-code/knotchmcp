@@ -26,6 +26,7 @@ class ClayClient:
         last_name: str,
         company_domain: str,
         requested_data: list[str] | None = None,
+        linkedin_url: str | None = None,
     ) -> dict:
         if not self._webhook_url:
             return {
@@ -44,6 +45,8 @@ class ClayClient:
             "requestedData": requested_data or ["phone", "email"],
             "correlationId": correlation_id,
         }
+        if linkedin_url:
+            payload["linkedinUrl"] = linkedin_url
         headers: dict[str, str] = {}
         if self._webhook_token:
             headers["Authorization"] = f"Bearer {self._webhook_token}"
