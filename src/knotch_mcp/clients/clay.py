@@ -1,88 +1,83 @@
 from __future__ import annotations
 
 import asyncio
-import time
+import uuid
 
 import httpx
 
-BASE_URL = "https://api.clay.com/v1"
-TIMEOUT = 30.0
-POLL_TIMEOUT = 45.0
-POLL_INITIAL_DELAY = 2.0
-POLL_BACKOFF_FACTOR = 2.0
-POLL_MAX_DELAY = 8.0
+CALLBACK_TIMEOUT = 120.0
 
 
 class ClayClient:
-    def __init__(self, api_key: str):
-        self._api_key = api_key
-        self._client = httpx.AsyncClient(base_url=BASE_URL, timeout=TIMEOUT)
-        self._poll_timeout = POLL_TIMEOUT
-        self._poll_initial_delay = POLL_INITIAL_DELAY
+    def __init__(self, webhook_url: str = "", webhook_token: str = ""):
+        self._webhook_url = webhook_url
+        self._webhook_token = webhook_token
+        self._client = httpx.AsyncClient(timeout=30.0)
+        self._pending: dict[str, asyncio.Event] = {}
+        self._results: dict[str, dict] = {}
 
-    async def _post(self, path: str, body: dict) -> dict:
-        resp = await self._client.post(
-            path,
-            json=body,
-            headers={"Authorization": f"Bearer {self._api_key}"},
-        )
-        resp.raise_for_status()
-        return resp.json()
+    @property
+    def configured(self) -> bool:
+        return bool(self._webhook_url)
 
-    async def _get(self, path: str) -> dict:
-        resp = await self._client.get(
-            path,
-            headers={"Authorization": f"Bearer {self._api_key}"},
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    async def _poll_task(self, task_id: str) -> dict:
-        delay = self._poll_initial_delay
-        deadline = time.monotonic() + self._poll_timeout
-        while time.monotonic() < deadline:
-            result = await self._get(f"/tasks/{task_id}")
-            if result.get("status") not in ("processing", "pending", "queued"):
-                return result
-            await asyncio.sleep(delay)
-            delay = min(delay * POLL_BACKOFF_FACTOR, POLL_MAX_DELAY)
-        return {"status": "timeout", "taskId": task_id}
-
-    async def find_and_enrich_contacts(
+    async def enrich_contact(
         self,
-        contacts: list[dict],
-        contact_data_points: list[dict] | None = None,
-        company_data_points: list[dict] | None = None,
-    ) -> dict:
-        body: dict = {"contactIdentifiers": contacts}
-        data_points: dict = {}
-        if contact_data_points:
-            data_points["contactDataPoints"] = contact_data_points
-        if company_data_points:
-            data_points["companyDataPoints"] = company_data_points
-        if data_points:
-            body["dataPoints"] = data_points
-        resp = await self._post("/find-and-enrich-list-of-contacts", body)
-        task_id = resp["taskId"]
-        return await self._poll_task(task_id)
-
-    async def find_contacts_at_company(
-        self,
+        first_name: str,
+        last_name: str,
         company_domain: str,
-        job_title_keywords: list[str] | None = None,
-        locations: list[str] | None = None,
+        requested_data: list[str] | None = None,
     ) -> dict:
-        body: dict = {"companyIdentifier": company_domain}
-        filters: dict = {}
-        if job_title_keywords:
-            filters["job_title_keywords"] = job_title_keywords
-        if locations:
-            filters["locations"] = locations
-        if filters:
-            body["contactFilters"] = filters
-        resp = await self._post("/find-and-enrich-contacts-at-company", body)
-        task_id = resp["taskId"]
-        return await self._poll_task(task_id)
+        if not self._webhook_url:
+            return {
+                "status": "not_configured",
+                "message": "Clay webhook URL not configured. Set CLAY_WEBHOOK_URL env var.",
+            }
+
+        correlation_id = str(uuid.uuid4())
+        event = asyncio.Event()
+        self._pending[correlation_id] = event
+
+        payload = {
+            "firstName": first_name,
+            "lastName": last_name,
+            "companyDomain": company_domain,
+            "requestedData": requested_data or ["phone", "email"],
+            "correlationId": correlation_id,
+        }
+        headers: dict[str, str] = {}
+        if self._webhook_token:
+            headers["Authorization"] = f"Bearer {self._webhook_token}"
+
+        try:
+            resp = await self._client.post(
+                self._webhook_url, json=payload, headers=headers
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError:
+            self._pending.pop(correlation_id, None)
+            return {
+                "status": "webhook_error",
+                "message": "Failed to POST to Clay webhook",
+            }
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=CALLBACK_TIMEOUT)
+            result = self._results.pop(correlation_id, {"status": "unknown"})
+        except asyncio.TimeoutError:
+            result = {"status": "timeout", "correlationId": correlation_id}
+        finally:
+            self._pending.pop(correlation_id, None)
+            self._results.pop(correlation_id, None)
+
+        return result
+
+    def receive_callback(self, data: dict) -> bool:
+        correlation_id = data.get("correlationId")
+        if not correlation_id or correlation_id not in self._pending:
+            return False
+        self._results[correlation_id] = data
+        self._pending[correlation_id].set()
+        return True
 
     async def close(self) -> None:
         await self._client.aclose()

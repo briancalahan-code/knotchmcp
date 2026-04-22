@@ -316,27 +316,17 @@ async def _enrich_contact(
     else:
         still_missing = empty_fields
 
-    if still_missing:
+    if still_missing and clay.configured:
         first = props.get("firstname", "")
         last = props.get("lastname", "")
         domain = props.get("company", "")
 
         if first and last and domain:
-            clay_data_points = [{"type": "Email"}]
-            if "phone" in still_missing:
-                clay_data_points.append(
-                    {
-                        "type": "Custom",
-                        "dataPointName": "Phone Number",
-                        "dataPointDescription": "Find direct phone number",
-                    }
-                )
-
-            clay_result = await clay.find_and_enrich_contacts(
-                contacts=[
-                    {"contactName": f"{first} {last}", "companyIdentifier": domain}
-                ],
-                contact_data_points=clay_data_points,
+            clay_result = await clay.enrich_contact(
+                first_name=first,
+                last_name=last,
+                company_domain=domain,
+                requested_data=[f for f in still_missing if f in ("email", "phone")],
             )
             log_ctx.add_api_call("clay")
 
@@ -453,31 +443,22 @@ async def _clay_enrich(
     requested_data: list[str],
     clay: ClayClient,
 ) -> ClayEnrichResult:
-    """Enrich a contact via Clay with configurable data points."""
+    """Enrich a contact via Clay webhook with configurable data points."""
     log_ctx = ToolLogContext("clay_enrich")
 
-    contact_data_points: list[dict] = []
-    if "email" in requested_data:
-        contact_data_points.append({"type": "Email"})
-    if "phone" in requested_data:
-        contact_data_points.append(
-            {
-                "type": "Custom",
-                "dataPointName": "Phone Number",
-                "dataPointDescription": "Find direct phone number",
-            }
+    if not clay.configured:
+        logger.info("tool completed (clay not configured)", extra=log_ctx.finish())
+        return ClayEnrichResult(
+            enriched_fields={},
+            credits_used=0,
+            task_status="not_configured",
         )
-    if "work_history" in requested_data:
-        contact_data_points.append({"type": "Summarize Work History"})
 
-    result = await clay.find_and_enrich_contacts(
-        contacts=[
-            {
-                "contactName": f"{first_name} {last_name}",
-                "companyIdentifier": company_domain,
-            }
-        ],
-        contact_data_points=contact_data_points if contact_data_points else None,
+    result = await clay.enrich_contact(
+        first_name=first_name,
+        last_name=last_name,
+        company_domain=company_domain,
+        requested_data=[d for d in requested_data if d in ("email", "phone")],
     )
     log_ctx.add_api_call("clay")
 
@@ -486,7 +467,7 @@ async def _clay_enrich(
         contacts = result.get("results", [])
         if contacts:
             c = contacts[0]
-            for key in ("email", "phone", "linkedinUrl", "title", "workHistory"):
+            for key in ("email", "phone", "linkedinUrl", "title"):
                 if c.get(key):
                     enriched_fields[key] = str(c[key])
 

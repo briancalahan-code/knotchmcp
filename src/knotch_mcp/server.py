@@ -26,7 +26,10 @@ _rate_limiter = TokenBucket(
     rate=settings.apollo_rate_limit / 60.0, capacity=settings.apollo_rate_limit
 )
 _apollo = ApolloClient(api_key=settings.apollo_api_key, rate_limiter=_rate_limiter)
-_clay = ClayClient(api_key=settings.clay_api_key)
+_clay = ClayClient(
+    webhook_url=settings.clay_webhook_url,
+    webhook_token=settings.clay_webhook_token,
+)
 _hubspot = HubSpotClient(
     access_token=settings.hubspot_private_app_token,
     portal_id=settings.hubspot_portal_id,

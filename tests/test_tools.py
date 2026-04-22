@@ -87,7 +87,8 @@ def mock_hubspot():
 @pytest.fixture
 def mock_clay():
     client = AsyncMock()
-    client.find_and_enrich_contacts = AsyncMock(
+    client.configured = True
+    client.enrich_contact = AsyncMock(
         return_value={
             "status": "completed",
             "results": [{"contactName": "Jane Smith", "phone": "+14155551234"}],
