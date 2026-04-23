@@ -30,6 +30,7 @@ class ContactResult(BaseModel):
     hubspot_url: str | None = None
     gaps: list[str] = []
     suggested_actions: list[str] = []
+    next_step: str | None = None
 
 
 # ── Tool Inputs ────────────────────────────────────────────────────

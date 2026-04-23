@@ -84,9 +84,18 @@ async def _check_hubspot(
         contact.hubspot_status = "found"
         contact.hubspot_contact_id = hs_id
         contact.hubspot_url = hubspot.build_contact_url(hs_id)
+        if contact.gaps:
+            contact.next_step = (
+                "STOP and ask the user: 'Would you like me to run Clay "
+                "enrichment to fill in the missing " + ", ".join(contact.gaps) + "?'"
+            )
     else:
         contact.hubspot_status = "not_found"
         contact.suggested_actions.append("add_to_hubspot")
+        contact.next_step = (
+            "STOP and ask the user: 'Would you like me to add this contact "
+            "to HubSpot?' Do NOT run Clay or any other tool until the user answers."
+        )
 
     if contact.gaps:
         contact.suggested_actions.append("clay_enrich for " + ", ".join(contact.gaps))
