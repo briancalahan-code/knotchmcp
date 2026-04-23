@@ -341,6 +341,9 @@ async def _enrich_contact(
                 clay_contacts = clay_result.get("results", [])
                 if clay_contacts:
                     c = clay_contacts[0]
+                    email_status = c.get("emailStatus", "")
+                    if email_status == "invalid" and "email" in still_missing:
+                        still_missing.remove("email")
                     clay_field_map = {
                         "phone": "phone",
                         "hs_linkedin_url": "linkedinUrl",
@@ -348,6 +351,8 @@ async def _enrich_contact(
                         "state": "state",
                         "country": "country",
                     }
+                    if email_status != "invalid":
+                        clay_field_map["email"] = "email"
                     for field in list(still_missing):
                         clay_key = clay_field_map.get(field)
                         if clay_key and c.get(clay_key):
@@ -475,7 +480,7 @@ async def _clay_enrich(
         contacts = result.get("results", [])
         if contacts:
             c = contacts[0]
-            for key in ("email", "phone", "linkedinUrl", "title"):
+            for key in ("email", "phone", "linkedinUrl", "title", "emailStatus"):
                 if c.get(key):
                     enriched_fields[key] = str(c[key])
 
