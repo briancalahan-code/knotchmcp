@@ -52,7 +52,12 @@ async def find_contact_by_details(
     linkedin_url: str = "",
 ) -> dict:
     """Find a contact by name and company. Searches Apollo for contact details
-    and checks HubSpot for existing records. Returns gaps and suggested next actions."""
+    and checks HubSpot for existing records. Returns gaps and suggested next actions.
+
+    WORKFLOW: After showing the results, ALWAYS ask the user:
+    1. 'Would you like me to add this contact to HubSpot?' (if hubspot_status is not_found)
+    2. 'Would you like me to run Clay enrichment for missing data?' (if there are gaps)
+    Do NOT skip straight to Clay — always offer HubSpot first."""
     result = await _find_contact_by_details(
         first_name,
         last_name,
@@ -74,7 +79,10 @@ async def find_contacts_by_role(
 ) -> dict:
     """Find contacts by job title at a company. Returns top candidates with
     HubSpot status. Seniority options: owner, founder, c_suite, partner, vp,
-    head, director, manager, senior, entry, intern."""
+    head, director, manager, senior, entry, intern.
+
+    WORKFLOW: After showing results, ask the user which contacts they want to
+    add to HubSpot before suggesting Clay enrichment."""
     result = await _find_contacts_by_role(
         titles, company, _clean(seniority), limit, _apollo, _hubspot
     )
@@ -120,7 +128,9 @@ async def add_to_hubspot(
     apollo_id: str = "",
 ) -> dict:
     """Add a contact to HubSpot. Dedupes by email and LinkedIn URL first — updates
-    if found, creates if new. Associates with the matching company by domain."""
+    if found, creates if new. Creates the company in HubSpot if it doesn't exist
+    yet, then associates the contact to the company. Always pass company_domain
+    when available so the company association works."""
     result = await _add_to_hubspot(
         first_name,
         last_name,

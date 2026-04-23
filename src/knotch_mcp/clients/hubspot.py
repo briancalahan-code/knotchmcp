@@ -89,6 +89,13 @@ class HubSpotClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def create_company(self, properties: dict) -> dict:
+        resp = await self._client.post(
+            "/crm/v3/objects/companies", json={"properties": properties}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def search_companies_by_domain(self, domain: str) -> list[dict]:
         return await self._search(
             "companies",

@@ -21,6 +21,7 @@ class ContactResult(BaseModel):
     apollo_id: str | None = None
     phone: str | None = None
     phone_type: str | None = None
+    company_domain: str | None = None
     sources: list[str] = []
     hubspot_status: str = "not_checked"
     hubspot_contact_id: str | None = None
@@ -127,6 +128,7 @@ class AddToHubSpotResult(BaseModel):
     hubspot_url: str
     action: str
     company_associated: bool = False
+    company_created: bool = False
     company_name: str | None = None
 
 

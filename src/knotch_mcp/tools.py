@@ -62,6 +62,7 @@ def _extract_contact(person: dict) -> ContactResult:
         apollo_id=person.get("id"),
         phone=phone,
         phone_type=phone_type,
+        company_domain=org.get("primary_domain"),
         sources=["apollo"],
         gaps=gaps,
     )
@@ -427,15 +428,27 @@ async def _add_to_hubspot(
     log_ctx.add_api_call("hubspot")
 
     company_associated = False
+    company_created = False
     company_name = None
     if company_domain:
         companies = await hubspot.search_companies_by_domain(company_domain)
         log_ctx.add_api_call("hubspot")
         if companies:
-            await hubspot.associate_contact_to_company(hs_id, companies[0]["id"])
-            log_ctx.add_api_call("hubspot")
-            company_associated = True
+            company_id = companies[0]["id"]
             company_name = companies[0].get("properties", {}).get("name")
+        else:
+            company_props: dict[str, str] = {"domain": company_domain}
+            if company:
+                company_props["name"] = company
+            new_company = await hubspot.create_company(company_props)
+            log_ctx.add_api_call("hubspot")
+            company_id = new_company["id"]
+            company_name = company
+            company_created = True
+
+        await hubspot.associate_contact_to_company(hs_id, company_id)
+        log_ctx.add_api_call("hubspot")
+        company_associated = True
 
     logger.info("tool completed", extra=log_ctx.finish())
     return AddToHubSpotResult(
@@ -443,6 +456,7 @@ async def _add_to_hubspot(
         hubspot_url=hubspot.build_contact_url(hs_id),
         action=action,
         company_associated=company_associated,
+        company_created=company_created,
         company_name=company_name,
     )
 
