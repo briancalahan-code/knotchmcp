@@ -22,6 +22,8 @@ class ContactResult(BaseModel):
     phone: str | None = None
     phone_type: str | None = None
     company_domain: str | None = None
+    match_method: str | None = None
+    alternate_matches: list[dict] | None = None
     sources: list[str] = []
     hubspot_status: str = "not_checked"
     hubspot_contact_id: str | None = None

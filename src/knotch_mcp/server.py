@@ -51,12 +51,17 @@ async def find_contact_by_details(
     email: str = "",
     linkedin_url: str = "",
 ) -> dict:
-    """Find a contact by name and company. Searches Apollo for contact details
-    and checks HubSpot for existing records. Returns gaps and suggested next actions.
+    """Find a contact by name and company. Searches Apollo using exact match,
+    then falls back to nickname variants and keyword search if needed.
+    Checks HubSpot for existing records.
+
+    If match_method is not 'exact', confirm with the user that this is the
+    right person. If alternate_matches is present, show those candidates too.
 
     WORKFLOW: After showing the results, ALWAYS ask the user:
-    1. 'Would you like me to add this contact to HubSpot?' (if hubspot_status is not_found)
-    2. 'Would you like me to run Clay enrichment for missing data?' (if there are gaps)
+    1. 'Is this the right person?' (if match_method is not 'exact')
+    2. 'Would you like me to add this contact to HubSpot?' (if hubspot_status is not_found)
+    3. 'Would you like me to run Clay enrichment for missing data?' (if there are gaps)
     Do NOT skip straight to Clay — always offer HubSpot first."""
     result = await _find_contact_by_details(
         first_name,

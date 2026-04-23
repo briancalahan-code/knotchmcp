@@ -13,6 +13,7 @@ from knotch_mcp.clients.apollo import ApolloClient
 from knotch_mcp.clients.clay import ClayClient
 from knotch_mcp.clients.hubspot import HubSpotClient
 from knotch_mcp.log import ToolLogContext, get_logger
+from knotch_mcp.nicknames import get_name_variants
 from knotch_mcp.models import (
     AddToHubSpotResult,
     ClayEnrichResult,
@@ -93,6 +94,99 @@ async def _check_hubspot(
     return contact
 
 
+# ── Fallback helpers ────────────────────────────────────────────────
+
+
+async def _finalize_contact(
+    person: dict,
+    log_ctx: ToolLogContext,
+    hubspot: HubSpotClient,
+    match_method: str,
+) -> ContactResult:
+    contact = _extract_contact(person)
+    contact.match_method = match_method
+    log_ctx.add_api_call("hubspot")
+    contact = await _check_hubspot(contact, hubspot)
+    logger.info(
+        "tool completed (match_method=%s)", match_method, extra=log_ctx.finish()
+    )
+    return contact
+
+
+async def _try_relaxed_match(
+    first_name: str,
+    last_name: str,
+    domains: list[tuple[str, str]],
+    email: str | None,
+    linkedin_url: str | None,
+    apollo: ApolloClient,
+    log_ctx: ToolLogContext,
+) -> tuple[dict | None, str]:
+    if email:
+        person = await apollo.people_match(email=email)
+        log_ctx.add_api_call("apollo")
+        if person:
+            return person, "email"
+
+    if linkedin_url:
+        person = await apollo.people_match(linkedin_url=linkedin_url)
+        log_ctx.add_api_call("apollo")
+        if person:
+            return person, "linkedin"
+
+    name_variants = get_name_variants(first_name)
+    primary_domain = domains[0][1] if domains else None
+    if len(name_variants) > 1 and primary_domain:
+        for variant in name_variants[1:]:
+            person = await apollo.people_match(
+                first_name=variant, last_name=last_name, domain=primary_domain
+            )
+            log_ctx.add_api_call("apollo")
+            if person:
+                return person, "nickname"
+
+    for _, alt_domain in domains[1:]:
+        person = await apollo.people_match(
+            first_name=first_name, last_name=last_name, domain=alt_domain
+        )
+        log_ctx.add_api_call("apollo")
+        if person:
+            return person, "alternate_domain"
+
+    return None, ""
+
+
+async def _try_keyword_search(
+    first_name: str,
+    last_name: str,
+    domain: str | None,
+    company: str,
+    apollo: ApolloClient,
+    log_ctx: ToolLogContext,
+) -> list[dict]:
+    keywords = f"{first_name} {last_name}"
+    people_raw, _ = await apollo.people_search(
+        q_keywords=keywords, domain=domain, per_page=3
+    )
+    log_ctx.add_api_call("apollo")
+
+    if not people_raw and domain:
+        search_kw = f"{keywords} {company}" if not _is_domain(company) else keywords
+        people_raw, _ = await apollo.people_search(q_keywords=search_kw, per_page=3)
+        log_ctx.add_api_call("apollo")
+
+    if not people_raw:
+        return []
+
+    enriched = []
+    for stub in people_raw[:3]:
+        person = await apollo.people_match(apollo_id=stub.get("id"))
+        log_ctx.add_api_call("apollo")
+        if person:
+            enriched.append(person)
+    return enriched
+
+
 # ── Tool 1: find_contact_by_details ──────────────────────────────────
 
 
@@ -105,40 +199,75 @@ async def _find_contact_by_details(
     apollo: ApolloClient,
     hubspot: HubSpotClient,
 ) -> ContactResult:
-    """Apollo match + HubSpot check for a single named contact."""
+    """Three-tier Apollo cascade: exact → relaxed → keyword search."""
     log_ctx = ToolLogContext("find_contact_by_details")
 
-    domain = (
-        company if _is_domain(company) else await apollo.resolve_company_domain(company)
-    )
-    log_ctx.add_api_call("apollo")
+    # ── Resolve company domain(s) ──
+    if _is_domain(company):
+        domains: list[tuple[str, str]] = [(company, company)]
+    else:
+        domains = await apollo.resolve_company_domains(company, limit=3)
+        log_ctx.add_api_call("apollo")
 
+    primary_domain = domains[0][1] if domains else None
+
+    # ── Tier 1: Exact match ──
     person = await apollo.people_match(
         first_name=first_name,
         last_name=last_name,
-        domain=domain,
+        domain=primary_domain,
         organization_name=company if not _is_domain(company) else None,
         email=email,
         linkedin_url=linkedin_url,
     )
     log_ctx.add_api_call("apollo")
 
-    if not person:
-        contact = ContactResult(
-            name=f"{first_name} {last_name}",
-            company=company,
-            sources=[],
-            gaps=["apollo_returned_no_match"],
-            suggested_actions=["clay_enrich"],
+    if person:
+        return await _finalize_contact(person, log_ctx, hubspot, "exact")
+
+    # ── Tier 2: Relaxed match (email, linkedin, nicknames, alt domains) ──
+    person, method = await _try_relaxed_match(
+        first_name, last_name, domains, email, linkedin_url, apollo, log_ctx
+    )
+    if person:
+        return await _finalize_contact(person, log_ctx, hubspot, method)
+
+    # ── Tier 3: Keyword search ──
+    candidates = await _try_keyword_search(
+        first_name, last_name, primary_domain, company, apollo, log_ctx
+    )
+    if candidates:
+        if len(candidates) == 1:
+            return await _finalize_contact(
+                candidates[0], log_ctx, hubspot, "keyword_search"
+            )
+
+        best = await _finalize_contact(
+            candidates[0], log_ctx, hubspot, "keyword_search"
         )
-        logger.info("tool completed", extra=log_ctx.finish())
-        return contact
+        alt_summaries = []
+        for c in candidates[1:]:
+            org = c.get("organization") or {}
+            alt_summaries.append(
+                {
+                    "name": f"{c.get('first_name', '')} {c.get('last_name', '')}".strip(),
+                    "title": c.get("title"),
+                    "company": org.get("name"),
+                    "apollo_id": c.get("id"),
+                }
+            )
+        best.alternate_matches = alt_summaries
+        return best
 
-    contact = _extract_contact(person)
-    log_ctx.add_api_call("hubspot")
-    contact = await _check_hubspot(contact, hubspot)
-
-    logger.info("tool completed", extra=log_ctx.finish())
+    # ── No match ──
+    contact = ContactResult(
+        name=f"{first_name} {last_name}",
+        company=company,
+        sources=[],
+        gaps=["no_match_after_fallback"],
+        suggested_actions=["clay_enrich", "verify_spelling"],
+    )
+    logger.info("tool completed (no match)", extra=log_ctx.finish())
     return contact
 
 

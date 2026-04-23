@@ -15,6 +15,7 @@ from knotch_mcp.models import (
 def mock_apollo():
     client = AsyncMock()
     client.resolve_company_domain = AsyncMock(return_value="stripe.com")
+    client.resolve_company_domains = AsyncMock(return_value=[("Stripe", "stripe.com")])
     client.people_match = AsyncMock(
         return_value={
             "id": "abc123",
@@ -119,7 +120,8 @@ async def test_find_contact_by_details_found_not_in_hubspot(
     assert result.hubspot_status == "not_found"
     assert "add_to_hubspot" in result.suggested_actions
     assert "phone" in result.gaps
-    mock_apollo.resolve_company_domain.assert_called_once_with("Stripe")
+    mock_apollo.resolve_company_domains.assert_called_once_with("Stripe", limit=3)
+    assert result.match_method == "exact"
 
 
 @pytest.mark.asyncio
@@ -148,6 +150,7 @@ async def test_find_contact_by_details_already_in_hubspot(
 @pytest.mark.asyncio
 async def test_find_contact_not_found_in_apollo(mock_apollo, mock_hubspot, mock_clay):
     mock_apollo.people_match.return_value = None
+    mock_apollo.people_search.return_value = ([], 0)
     from knotch_mcp.tools import _find_contact_by_details
 
     result = await _find_contact_by_details(
@@ -161,7 +164,7 @@ async def test_find_contact_not_found_in_apollo(mock_apollo, mock_hubspot, mock_
     )
     assert result.name == "Nobody Exists"
     assert result.sources == []
-    assert "apollo_returned_no_match" in result.gaps
+    assert "no_match_after_fallback" in result.gaps
 
 
 @pytest.mark.asyncio
@@ -297,3 +300,149 @@ async def test_clay_enrich_success(mock_apollo, mock_hubspot, mock_clay):
     assert isinstance(result, ClayEnrichResult)
     assert result.task_status == "completed"
     assert "phone" in result.enriched_fields
+
+
+# ── Fallback cascade tests ─────────────────────────────────────────
+
+
+def _make_person(first="Jane", last="Smith", org_name="Stripe", domain="stripe.com"):
+    return {
+        "id": "abc123",
+        "first_name": first,
+        "last_name": last,
+        "title": "VP Engineering",
+        "organization": {"name": org_name, "primary_domain": domain},
+        "email": f"{first.lower()}@{domain}",
+        "email_status": "verified",
+        "linkedin_url": f"https://linkedin.com/in/{first.lower()}{last.lower()}",
+        "city": "San Francisco",
+        "state": "California",
+        "country": "United States",
+        "phone_numbers": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_nickname_fallback(mock_apollo, mock_hubspot, mock_clay):
+    call_count = 0
+    robert = _make_person(first="Robert")
+
+    async def match_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if kwargs.get("first_name") == "Robert":
+            return robert
+        return None
+
+    mock_apollo.people_match = AsyncMock(side_effect=match_side_effect)
+    mock_apollo.people_search.return_value = ([], 0)
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Bob", "Smith", "Stripe", None, None, mock_apollo, mock_hubspot
+    )
+    assert result.name == "Robert Smith"
+    assert result.match_method == "nickname"
+
+
+@pytest.mark.asyncio
+async def test_email_fallback(mock_apollo, mock_hubspot, mock_clay):
+    person = _make_person()
+
+    async def match_side_effect(**kwargs):
+        if kwargs.get("email") == "jane@stripe.com":
+            return person
+        return None
+
+    mock_apollo.people_match = AsyncMock(side_effect=match_side_effect)
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Jaane", "Smith", "Stripe", "jane@stripe.com", None, mock_apollo, mock_hubspot
+    )
+    assert result.name == "Jane Smith"
+    assert result.match_method == "email"
+
+
+@pytest.mark.asyncio
+async def test_keyword_search_fallback(mock_apollo, mock_hubspot, mock_clay):
+    person = _make_person(
+        first="Amy", last="Holmes", org_name="GrowthZone", domain="growthzone.com"
+    )
+
+    mock_apollo.people_match = AsyncMock(side_effect=[None, person])
+    mock_apollo.people_search.return_value = (
+        [{"id": "kw1", "first_name": "Amy", "last_name": "Holmes"}],
+        1,
+    )
+    mock_apollo.resolve_company_domains.return_value = [
+        ("GrowthZone", "growthzone.com")
+    ]
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Amy", "Holms", "Growthzone", None, None, mock_apollo, mock_hubspot
+    )
+    assert result.name == "Amy Holmes"
+    assert result.match_method == "keyword_search"
+
+
+@pytest.mark.asyncio
+async def test_alternate_domain_fallback(mock_apollo, mock_hubspot, mock_clay):
+    person = _make_person(org_name="Acme Corp", domain="acme.io")
+
+    async def match_side_effect(**kwargs):
+        if kwargs.get("domain") == "acme.io":
+            return person
+        return None
+
+    mock_apollo.people_match = AsyncMock(side_effect=match_side_effect)
+    mock_apollo.resolve_company_domains.return_value = [
+        ("Acme Inc", "acme.com"),
+        ("Acme Corp", "acme.io"),
+    ]
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Jane", "Smith", "Acme", None, None, mock_apollo, mock_hubspot
+    )
+    assert result.name == "Jane Smith"
+    assert result.match_method == "alternate_domain"
+
+
+@pytest.mark.asyncio
+async def test_multiple_candidates(mock_apollo, mock_hubspot, mock_clay):
+    p1 = _make_person(
+        first="Jane", last="Smith", org_name="Stripe", domain="stripe.com"
+    )
+    p2 = _make_person(first="Jane", last="Smith", org_name="Acme", domain="acme.com")
+
+    mock_apollo.people_match = AsyncMock(side_effect=[None, p1, p2])
+    mock_apollo.people_search.return_value = (
+        [
+            {"id": "kw1", "first_name": "Jane", "last_name": "Smith"},
+            {"id": "kw2", "first_name": "Jane", "last_name": "Smith"},
+        ],
+        2,
+    )
+    mock_apollo.resolve_company_domains.return_value = [("Stripe", "stripe.com")]
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Jane", "Smith", "Stripe", None, None, mock_apollo, mock_hubspot
+    )
+    assert result.match_method == "keyword_search"
+    assert result.alternate_matches is not None
+    assert len(result.alternate_matches) == 1
+    assert result.alternate_matches[0]["company"] == "Acme"
+
+
+@pytest.mark.asyncio
+async def test_exact_match_no_fallback(mock_apollo, mock_hubspot, mock_clay):
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Jane", "Smith", "Stripe", None, None, mock_apollo, mock_hubspot
+    )
+    assert result.match_method == "exact"
+    mock_apollo.people_search.assert_not_called()

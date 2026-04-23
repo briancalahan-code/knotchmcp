@@ -62,6 +62,7 @@ class ApolloClient:
         seniority: list[str] | None = None,
         per_page: int = 10,
         page: int = 1,
+        q_keywords: str | None = None,
     ) -> tuple[list[dict], int]:
         body: dict = {"page": page, "per_page": per_page}
         if titles:
@@ -70,6 +71,8 @@ class ApolloClient:
             body["q_organization_domains_list"] = [domain]
         if seniority:
             body["person_seniorities"] = seniority
+        if q_keywords:
+            body["q_keywords"] = q_keywords
         data = await self._post("/mixed_people/api_search", body)
         people = data.get("people", [])
         total = data.get("pagination", {}).get("total_entries", 0)
@@ -82,6 +85,18 @@ class ApolloClient:
         if orgs:
             return orgs[0].get("primary_domain")
         return None
+
+    async def resolve_company_domains(
+        self, company_name: str, limit: int = 3
+    ) -> list[tuple[str, str]]:
+        body = {"q_organization_name": company_name, "per_page": limit, "page": 1}
+        data = await self._post("/mixed_companies/search", body)
+        orgs = data.get("organizations", [])
+        return [
+            (o.get("name", ""), o.get("primary_domain", ""))
+            for o in orgs
+            if o.get("primary_domain")
+        ]
 
     async def close(self) -> None:
         await self._client.aclose()
