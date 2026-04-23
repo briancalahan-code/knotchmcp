@@ -36,11 +36,6 @@ _hubspot = HubSpotClient(
 )
 
 
-def _check_auth(provided: str, expected: str) -> bool:
-    token = provided.removeprefix("Bearer ").strip()
-    return token == expected
-
-
 @mcp.tool()
 async def find_contact_by_details(
     first_name: str,
