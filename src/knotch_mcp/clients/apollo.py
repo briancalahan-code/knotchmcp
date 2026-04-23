@@ -81,7 +81,7 @@ class ApolloClient:
     async def resolve_company_domain(self, company_name: str) -> str | None:
         body = {"q_organization_name": company_name, "per_page": 1, "page": 1}
         data = await self._post("/mixed_companies/search", body)
-        orgs = data.get("organizations", [])
+        orgs = data.get("organizations") or data.get("accounts") or []
         if orgs:
             return orgs[0].get("primary_domain")
         return None
@@ -91,7 +91,7 @@ class ApolloClient:
     ) -> list[tuple[str, str]]:
         body = {"q_organization_name": company_name, "per_page": limit, "page": 1}
         data = await self._post("/mixed_companies/search", body)
-        orgs = data.get("organizations", [])
+        orgs = data.get("organizations") or data.get("accounts") or []
         return [
             (o.get("name", ""), o.get("primary_domain", ""))
             for o in orgs

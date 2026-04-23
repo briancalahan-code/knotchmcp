@@ -105,6 +105,23 @@ async def test_org_search(apollo):
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_org_search_accounts_format(apollo):
+    """Apollo sometimes returns results in 'accounts' instead of 'organizations'."""
+    respx.post("https://api.apollo.io/api/v1/mixed_companies/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "accounts": [{"name": "Diageo", "primary_domain": "diageo.com"}],
+                "organizations": [],
+            },
+        )
+    )
+    domain = await apollo.resolve_company_domain("Diageo")
+    assert domain == "diageo.com"
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_org_search_no_result(apollo):
     respx.post("https://api.apollo.io/api/v1/mixed_companies/search").mock(
         return_value=httpx.Response(200, json={"organizations": []})
