@@ -668,6 +668,10 @@ async def _clay_enrich(
                 enriched_fields=enriched_fields,
                 credits_used=callback_data.get("creditsUsed", 0),
                 task_status="completed",
+                next_step=(
+                    "STOP and ask the user: 'Would you like me to add this "
+                    "contact to HubSpot?' Do NOT proceed without the user's answer."
+                ),
             )
 
     # Timeout — return correlationId for manual follow-up
@@ -676,6 +680,10 @@ async def _clay_enrich(
         enriched_fields={"correlationId": correlation_id},
         credits_used=0,
         task_status="timeout",
+        next_step=(
+            "STOP and ask the user: 'Would you like me to add this "
+            "contact to HubSpot?' Do NOT proceed without the user's answer."
+        ),
     )
 
 
@@ -709,4 +717,8 @@ async def _check_clay_result(
         enriched_fields=enriched_fields,
         credits_used=result.get("creditsUsed", 0),
         task_status="completed",
+        next_step=(
+            "STOP and ask the user: 'Would you like me to add this "
+            "contact to HubSpot?' Do NOT proceed without the user's answer."
+        ),
     )

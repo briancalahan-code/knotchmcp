@@ -142,3 +142,4 @@ class ClayEnrichResult(BaseModel):
     source: str = "clay"
     credits_used: int = 0
     task_status: str = "completed"
+    next_step: str | None = None
