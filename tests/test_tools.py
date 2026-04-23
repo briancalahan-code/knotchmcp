@@ -838,6 +838,31 @@ def test_company_inferred_from_email():
     assert result.company_domain == "disney.com"
 
 
+def test_email_domain_overrides_org_domain():
+    """When email domain differs from org.primary_domain, prefer email domain."""
+    from knotch_mcp.tools import _extract_contact
+
+    person = {
+        "id": "dom1",
+        "first_name": "Catie",
+        "last_name": "Ivey",
+        "email": "catie.ivey@growthzone.com",
+        "email_status": "verified",
+        "title": "CRO",
+        "linkedin_url": None,
+        "organization": {
+            "name": "GrowthZone AMS",
+            "primary_domain": "micronetonline.com",
+        },
+        "phone_numbers": [],
+        "city": None,
+        "state": None,
+        "country": None,
+    }
+    result = _extract_contact(person)
+    assert result.company_domain == "growthzone.com"
+
+
 def test_freemail_not_inferred():
     """Freemail domains should not be used to infer company."""
     from knotch_mcp.tools import _extract_contact

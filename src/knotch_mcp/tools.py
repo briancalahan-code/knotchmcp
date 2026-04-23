@@ -152,6 +152,18 @@ def _extract_contact(person: dict) -> ContactResult:
         "aol.com",
         "protonmail.com",
     }
+
+    # Prefer email domain over org.primary_domain when they differ —
+    # Apollo org records often point to parent/legacy domains.
+    if person.get("email") and "@" in person.get("email", ""):
+        email_domain = person["email"].split("@")[1].lower()
+        if (
+            email_domain not in _FREEMAIL
+            and company_domain
+            and email_domain != company_domain.lower()
+        ):
+            company_domain = email_domain
+
     if not company and person.get("email") and "@" in person.get("email", ""):
         email_domain = person["email"].split("@")[1].lower()
         if email_domain not in _FREEMAIL:
