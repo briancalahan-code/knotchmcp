@@ -450,6 +450,10 @@ async def _add_to_hubspot(
 # ── Tool 6: clay_enrich ─────────────────────────────────────────────
 
 
+CLAY_POLL_INTERVAL = 5.0
+CLAY_POLL_TIMEOUT = 50.0
+
+
 async def _clay_enrich(
     first_name: str,
     last_name: str,
@@ -458,7 +462,7 @@ async def _clay_enrich(
     clay: ClayClient,
     linkedin_url: str | None = None,
 ) -> ClayEnrichResult:
-    """Fire Clay webhook and return immediately with a correlationId."""
+    """Fire Clay webhook and poll for the callback result."""
     log_ctx = ToolLogContext("clay_enrich")
 
     if not clay.configured:
@@ -479,21 +483,47 @@ async def _clay_enrich(
     log_ctx.add_api_call("clay")
 
     status = result.get("status", "unknown")
-
-    if status == "submitted":
-        correlation_id = result.get("correlationId", "")
-        logger.info("tool completed (submitted)", extra=log_ctx.finish())
+    if status != "submitted":
+        logger.info("tool completed (%s)", status, extra=log_ctx.finish())
         return ClayEnrichResult(
-            enriched_fields={"correlationId": correlation_id},
+            enriched_fields={},
             credits_used=0,
-            task_status="submitted",
+            task_status=status,
         )
 
-    logger.info("tool completed (%s)", status, extra=log_ctx.finish())
+    correlation_id = result.get("correlationId", "")
+
+    elapsed = 0.0
+    while elapsed < CLAY_POLL_TIMEOUT:
+        await asyncio.sleep(CLAY_POLL_INTERVAL)
+        elapsed += CLAY_POLL_INTERVAL
+
+        callback_data = clay.peek_result(correlation_id)
+        if callback_data is not None:
+            clay.get_result(correlation_id)
+            enriched_fields: dict[str, str] = {}
+            for key in ("email", "phone", "linkedinUrl", "title", "emailStatus"):
+                val = callback_data.get(key)
+                if val:
+                    enriched_fields[key] = str(val)
+
+            logger.info(
+                "tool completed (callback received at %.0fs)",
+                elapsed,
+                extra=log_ctx.finish(),
+            )
+            return ClayEnrichResult(
+                enriched_fields=enriched_fields,
+                credits_used=callback_data.get("creditsUsed", 0),
+                task_status="completed",
+            )
+
+    # Timeout — return correlationId for manual follow-up
+    logger.info("tool completed (poll timeout)", extra=log_ctx.finish())
     return ClayEnrichResult(
-        enriched_fields={},
+        enriched_fields={"correlationId": correlation_id},
         credits_used=0,
-        task_status=status,
+        task_status="timeout",
     )
 
 

@@ -131,9 +131,9 @@ async def clay_enrich(
     requested_data: list[str] | None = None,
     linkedin_url: str | None = None,
 ) -> dict:
-    """Enrich a contact using Clay. Returns immediately with a correlationId.
-    IMPORTANT: After calling this, wait 90 seconds, then call check_clay_result
-    with the correlationId to get the enriched phone/email data.
+    """Enrich a contact using Clay. Waits up to 50s for results. If the callback
+    arrives in time, returns the enriched data directly. If it times out, returns
+    a correlationId — use check_clay_result to retrieve the data later.
     requested_data options: phone, email. Pass linkedin_url if available."""
     data = requested_data or ["phone", "email"]
     result = await _clay_enrich(
