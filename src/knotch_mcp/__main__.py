@@ -8,6 +8,10 @@ from starlette.routing import Route
 from knotch_mcp.server import mcp, settings, _clay
 
 
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
+
+
 async def clay_callback(request: Request) -> JSONResponse:
     data = await request.json()
     accepted = _clay.receive_callback(data)
@@ -26,6 +30,7 @@ def main():
 
         app = Starlette(
             routes=[
+                Route("/health", health, methods=["GET"]),
                 Route("/clay/callback", clay_callback, methods=["POST"]),
             ],
         )
