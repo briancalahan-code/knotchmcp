@@ -337,8 +337,8 @@ async def _enrich_contact(
             log_ctx.add_api_call("clay")
 
             clay_status = clay_result.get("status")
-            if clay_status == "timeout":
-                sources.append("clay (timeout)")
+            if clay_status == "submitted":
+                sources.append("clay (submitted — call check_clay_result later)")
             elif clay_status == "completed":
                 sources.append("clay")
                 clay_contacts = clay_result.get("results", [])
@@ -458,7 +458,8 @@ async def _clay_enrich(
     clay: ClayClient,
     linkedin_url: str | None = None,
 ) -> ClayEnrichResult:
-    """Enrich a contact via Clay webhook with configurable data points."""
+    """Trigger Clay enrichment. Returns immediately with a correlationId.
+    Use check_clay_result to retrieve results after ~60-90 seconds."""
     log_ctx = ToolLogContext("clay_enrich")
 
     if not clay.configured:
@@ -481,19 +482,52 @@ async def _clay_enrich(
     enriched_fields: dict[str, str] = {}
     status = result.get("status", "unknown")
 
-    if status == "completed":
+    if status == "submitted":
+        enriched_fields["correlationId"] = result.get("correlationId", "")
+    elif status == "completed":
         contacts = result.get("results", [])
         if contacts:
             c = contacts[0]
             for key in ("email", "phone", "linkedinUrl", "title", "emailStatus"):
                 if c.get(key):
                     enriched_fields[key] = str(c[key])
-    elif status == "timeout":
-        enriched_fields["_note"] = result.get("message", "Enrichment submitted to Clay")
 
     logger.info("tool completed", extra=log_ctx.finish())
     return ClayEnrichResult(
         enriched_fields=enriched_fields,
         credits_used=result.get("creditsUsed", 0),
         task_status=status,
+    )
+
+
+# ── Tool 7: check_clay_result ──────────────────────────────────────
+
+
+async def _check_clay_result(
+    correlation_id: str,
+    clay: ClayClient,
+) -> ClayEnrichResult:
+    """Retrieve stored Clay callback results by correlationId."""
+    log_ctx = ToolLogContext("check_clay_result")
+
+    result = clay.get_result(correlation_id)
+    if result is None:
+        logger.info("tool completed (pending)", extra=log_ctx.finish())
+        return ClayEnrichResult(
+            enriched_fields={},
+            credits_used=0,
+            task_status="pending",
+        )
+
+    enriched_fields: dict[str, str] = {}
+    for key in ("email", "phone", "linkedinUrl", "title", "emailStatus"):
+        val = result.get(key)
+        if val:
+            enriched_fields[key] = str(val)
+
+    logger.info("tool completed", extra=log_ctx.finish())
+    return ClayEnrichResult(
+        enriched_fields=enriched_fields,
+        credits_used=result.get("creditsUsed", 0),
+        task_status="completed",
     )

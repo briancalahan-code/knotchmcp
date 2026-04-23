@@ -50,7 +50,7 @@ async def clay_callback(request: Request) -> JSONResponse:
         extra={
             "keys": list(data.keys()),
             "has_correlation_id": "correlationId" in data,
-            "pending_ids": list(_clay._pending.keys()),
+            "stored_results": list(_clay._callback_results.keys()),
             "pending_lookups": list(_clay._pending_lookups.keys()),
         },
     )

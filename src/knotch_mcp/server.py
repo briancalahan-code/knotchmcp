@@ -10,6 +10,7 @@ from knotch_mcp.log import get_logger
 from knotch_mcp.rate_limit import TokenBucket
 from knotch_mcp.tools import (
     _add_to_hubspot,
+    _check_clay_result,
     _clay_enrich,
     _enrich_contact,
     _find_contact_by_details,
@@ -132,9 +133,19 @@ async def clay_enrich(
 ) -> dict:
     """Enrich a contact using Clay. Use this as a follow-up when Apollo didn't
     return phone, email, or other data. requested_data options: phone, email.
-    Pass linkedin_url if available — Clay uses it for phone lookup. Consumes Clay credits."""
+    Pass linkedin_url if available — Clay uses it for phone lookup. Consumes Clay credits.
+    Returns a correlationId — call check_clay_result after ~90 seconds to get the data."""
     data = requested_data or ["phone", "email"]
     result = await _clay_enrich(
         first_name, last_name, company_domain, data, _clay, linkedin_url=linkedin_url
     )
+    return result.model_dump()
+
+
+@mcp.tool()
+async def check_clay_result(correlation_id: str) -> dict:
+    """Check if Clay enrichment results are ready. Call this ~90 seconds after
+    clay_enrich returned a correlationId. Returns the enriched data if the Clay
+    callback has arrived, or status 'pending' if still waiting."""
+    result = await _check_clay_result(correlation_id, _clay)
     return result.model_dump()
