@@ -5,7 +5,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from knotch_mcp.log import get_logger
 from knotch_mcp.server import mcp, settings, _clay
+
+logger = get_logger("knotch_mcp.main")
 
 OPEN_PATHS = {"/health", "/clay/callback"}
 
@@ -42,10 +45,17 @@ async def health(request: Request) -> JSONResponse:
 
 async def clay_callback(request: Request) -> JSONResponse:
     data = await request.json()
-    print(f"[clay_callback] received: {data}")
-    print(f"[clay_callback] pending keys: {list(_clay._pending.keys())}")
+    logger.info(
+        "clay callback received",
+        extra={
+            "keys": list(data.keys()),
+            "has_correlation_id": "correlationId" in data,
+            "pending_ids": list(_clay._pending.keys()),
+            "pending_lookups": list(_clay._pending_lookups.keys()),
+        },
+    )
     accepted = _clay.receive_callback(data)
-    print(f"[clay_callback] accepted: {accepted}")
+    logger.info("clay callback %s", "MATCHED" if accepted else "NO MATCH")
     if accepted:
         return JSONResponse({"status": "ok"})
     return JSONResponse({"status": "ignored"}, status_code=404)

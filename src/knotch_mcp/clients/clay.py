@@ -5,7 +5,8 @@ import uuid
 
 import httpx
 
-CALLBACK_TIMEOUT = 15.0
+CALLBACK_TIMEOUT = 50.0
+POLL_INTERVAL = 2.0
 
 
 class ClayClient:
@@ -15,6 +16,7 @@ class ClayClient:
         self._client = httpx.AsyncClient(timeout=30.0)
         self._pending: dict[str, asyncio.Event] = {}
         self._results: dict[str, dict] = {}
+        self._pending_lookups: dict[str, str] = {}
 
     @property
     def configured(self) -> bool:
@@ -35,8 +37,12 @@ class ClayClient:
             }
 
         correlation_id = str(uuid.uuid4())
+        lookup_key = (
+            f"{first_name.lower()}|{last_name.lower()}|{company_domain.lower()}"
+        )
         event = asyncio.Event()
         self._pending[correlation_id] = event
+        self._pending_lookups[lookup_key] = correlation_id
 
         payload = {
             "firstName": first_name,
@@ -58,6 +64,7 @@ class ClayClient:
             resp.raise_for_status()
         except httpx.HTTPError:
             self._pending.pop(correlation_id, None)
+            self._pending_lookups.pop(lookup_key, None)
             return {
                 "status": "webhook_error",
                 "message": "Failed to POST to Clay webhook",
@@ -68,27 +75,42 @@ class ClayClient:
             result = self._results.pop(correlation_id, {"status": "unknown"})
         except asyncio.TimeoutError:
             result = {
-                "status": "enrichment_submitted",
+                "status": "timeout",
                 "message": (
                     f"Clay enrichment triggered for {first_name} {last_name} at "
-                    f"{company_domain}. Data will appear in the Clay table shortly. "
-                    f"The enrichment typically completes in under 15 seconds."
+                    f"{company_domain} but callback not received within "
+                    f"{int(CALLBACK_TIMEOUT)}s. Check Clay table for results."
                 ),
                 "correlationId": correlation_id,
             }
         finally:
             self._pending.pop(correlation_id, None)
+            self._pending_lookups.pop(lookup_key, None)
             self._results.pop(correlation_id, None)
 
         return result
 
     def receive_callback(self, data: dict) -> bool:
-        correlation_id = data.get("correlationId")
-        if not correlation_id or correlation_id not in self._pending:
-            return False
-        self._results[correlation_id] = data
-        self._pending[correlation_id].set()
-        return True
+        # Primary match: correlationId
+        correlation_id = data.get("correlationId") or data.get("correlation_id")
+        if correlation_id and correlation_id in self._pending:
+            self._results[correlation_id] = data
+            self._pending[correlation_id].set()
+            return True
+
+        # Fallback match: name + domain (Clay may not return the correlationId)
+        first = (data.get("firstName") or data.get("first_name") or "").lower()
+        last = (data.get("lastName") or data.get("last_name") or "").lower()
+        domain = (data.get("companyDomain") or data.get("company_domain") or "").lower()
+        if first and last and domain:
+            lookup_key = f"{first}|{last}|{domain}"
+            matched_id = self._pending_lookups.get(lookup_key)
+            if matched_id and matched_id in self._pending:
+                self._results[matched_id] = data
+                self._pending[matched_id].set()
+                return True
+
+        return False
 
     async def close(self) -> None:
         await self._client.aclose()
