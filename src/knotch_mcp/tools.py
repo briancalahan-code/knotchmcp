@@ -1,4 +1,4 @@
-"""Orchestration functions for all 6 MCP tools.
+"""Orchestration functions for all 7 MCP tools.
 
 Each underscore-prefixed function contains the business logic for one tool.
 The MCP server module registers thin wrappers that parse input models and
@@ -8,6 +8,7 @@ forward to these functions with the appropriate client instances.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from knotch_mcp.clients.apollo import ApolloClient
 from knotch_mcp.clients.clay import ClayClient
@@ -450,6 +451,10 @@ async def _add_to_hubspot(
 # ── Tool 6: clay_enrich ─────────────────────────────────────────────
 
 
+CLAY_POLL_INTERVAL = 5.0
+CLAY_POLL_TIMEOUT = 120.0
+
+
 async def _clay_enrich(
     first_name: str,
     last_name: str,
@@ -457,9 +462,10 @@ async def _clay_enrich(
     requested_data: list[str],
     clay: ClayClient,
     linkedin_url: str | None = None,
+    report_progress: Any = None,
 ) -> ClayEnrichResult:
-    """Trigger Clay enrichment. Returns immediately with a correlationId.
-    Use check_clay_result to retrieve results after ~60-90 seconds."""
+    """Trigger Clay enrichment and wait for the callback with progress updates.
+    Falls back to returning a correlationId if the callback doesn't arrive in time."""
     log_ctx = ToolLogContext("clay_enrich")
 
     if not clay.configured:
@@ -479,24 +485,46 @@ async def _clay_enrich(
     )
     log_ctx.add_api_call("clay")
 
-    enriched_fields: dict[str, str] = {}
     status = result.get("status", "unknown")
+    if status != "submitted":
+        logger.info("tool completed (webhook failed)", extra=log_ctx.finish())
+        return ClayEnrichResult(
+            enriched_fields={},
+            credits_used=0,
+            task_status=status,
+        )
 
-    if status == "submitted":
-        enriched_fields["correlationId"] = result.get("correlationId", "")
-    elif status == "completed":
-        contacts = result.get("results", [])
-        if contacts:
-            c = contacts[0]
+    correlation_id = result.get("correlationId", "")
+
+    elapsed = 0.0
+    while elapsed < CLAY_POLL_TIMEOUT:
+        await asyncio.sleep(CLAY_POLL_INTERVAL)
+        elapsed += CLAY_POLL_INTERVAL
+
+        if report_progress:
+            await report_progress(elapsed, CLAY_POLL_TIMEOUT)
+
+        callback_data = clay.peek_result(correlation_id)
+        if callback_data is not None:
+            clay.get_result(correlation_id)
+            enriched_fields: dict[str, str] = {}
             for key in ("email", "phone", "linkedinUrl", "title", "emailStatus"):
-                if c.get(key):
-                    enriched_fields[key] = str(c[key])
+                val = callback_data.get(key)
+                if val:
+                    enriched_fields[key] = str(val)
 
-    logger.info("tool completed", extra=log_ctx.finish())
+            logger.info("tool completed (callback received)", extra=log_ctx.finish())
+            return ClayEnrichResult(
+                enriched_fields=enriched_fields,
+                credits_used=callback_data.get("creditsUsed", 0),
+                task_status="completed",
+            )
+
+    logger.info("tool completed (poll timeout)", extra=log_ctx.finish())
     return ClayEnrichResult(
-        enriched_fields=enriched_fields,
-        credits_used=result.get("creditsUsed", 0),
-        task_status=status,
+        enriched_fields={"correlationId": correlation_id},
+        credits_used=0,
+        task_status="timeout",
     )
 
 

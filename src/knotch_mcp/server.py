@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from knotch_mcp.clients.apollo import ApolloClient
 from knotch_mcp.clients.clay import ClayClient
@@ -130,14 +130,22 @@ async def clay_enrich(
     company_domain: str,
     requested_data: list[str] | None = None,
     linkedin_url: str | None = None,
+    ctx: Context | None = None,
 ) -> dict:
     """Enrich a contact using Clay. Use this as a follow-up when Apollo didn't
     return phone, email, or other data. requested_data options: phone, email.
     Pass linkedin_url if available — Clay uses it for phone lookup. Consumes Clay credits.
-    Returns a correlationId — call check_clay_result after ~90 seconds to get the data."""
+    Waits up to ~2 minutes for results. If timed out, use check_clay_result with the
+    returned correlationId."""
     data = requested_data or ["phone", "email"]
     result = await _clay_enrich(
-        first_name, last_name, company_domain, data, _clay, linkedin_url=linkedin_url
+        first_name,
+        last_name,
+        company_domain,
+        data,
+        _clay,
+        linkedin_url=linkedin_url,
+        report_progress=ctx.report_progress if ctx else None,
     )
     return result.model_dump()
 

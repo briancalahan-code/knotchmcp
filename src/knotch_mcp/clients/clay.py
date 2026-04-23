@@ -88,6 +88,9 @@ class ClayClient:
 
         return False
 
+    def peek_result(self, correlation_id: str) -> dict | None:
+        return self._callback_results.get(correlation_id)
+
     def get_result(self, correlation_id: str) -> dict | None:
         return self._callback_results.pop(correlation_id, None)
 
