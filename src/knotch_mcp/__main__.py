@@ -1,8 +1,6 @@
 import sys
 
 from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -12,17 +10,30 @@ from knotch_mcp.server import mcp, settings, _clay
 OPEN_PATHS = {"/health", "/clay/callback"}
 
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        if request.url.path in OPEN_PATHS:
-            return await call_next(request)
-        if not settings.mcp_auth_token:
-            return await call_next(request)
-        provided = request.headers.get("authorization", "")
-        token = provided.removeprefix("Bearer ").strip()
+class BearerAuthMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path in OPEN_PATHS or not settings.mcp_auth_token:
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        auth = headers.get(b"authorization", b"").decode()
+        token = auth.removeprefix("Bearer ").strip()
+
         if token != settings.mcp_auth_token:
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return await call_next(request)
+            response = JSONResponse({"error": "unauthorized"}, status_code=401)
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
 
 
 async def health(request: Request) -> JSONResponse:
@@ -52,9 +63,9 @@ def main():
                 Route("/health", health, methods=["GET"]),
                 Route("/clay/callback", clay_callback, methods=["POST"]),
             ],
-            middleware=[Middleware(BearerAuthMiddleware)],
         )
         app.mount("/", sse_app)
+        app = BearerAuthMiddleware(app)
 
         import uvicorn
 
