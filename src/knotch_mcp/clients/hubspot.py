@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 
 BASE_URL = "https://api.hubapi.com"
-TIMEOUT = 10.0
 
 CONTACT_PROPERTIES = [
     "firstname",
@@ -20,13 +21,63 @@ CONTACT_PROPERTIES = [
 
 
 class HubSpotClient:
-    def __init__(self, access_token: str, portal_id: str):
+    def __init__(
+        self,
+        access_token: str,
+        portal_id: str,
+        max_retries: int = 3,
+        base_delay: float = 1.0,
+        timeout: float = 15.0,
+    ):
         self._portal_id = portal_id
+        self._max_retries = max_retries
+        self._base_delay = base_delay
         self._client = httpx.AsyncClient(
             base_url=BASE_URL,
-            timeout=TIMEOUT,
+            timeout=timeout,
             headers={"Authorization": f"Bearer {access_token}"},
         )
+
+    async def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: dict | None = None,
+        params: dict | None = None,
+    ) -> httpx.Response:
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                resp = await self._client.request(method, url, json=json, params=params)
+                if resp.status_code == 429:
+                    if attempt < self._max_retries:
+                        delay = float(
+                            resp.headers.get(
+                                "Retry-After",
+                                self._base_delay * (2**attempt),
+                            )
+                        )
+                        await asyncio.sleep(min(delay, 10.0))
+                        continue
+                resp.raise_for_status()
+                return resp
+            except httpx.TimeoutException as exc:
+                last_exc = exc
+                if attempt < self._max_retries:
+                    await asyncio.sleep(self._base_delay * (2**attempt))
+                    continue
+                raise
+            except httpx.HTTPStatusError as exc:
+                if (
+                    exc.response.status_code in (429, 502, 503)
+                    and attempt < self._max_retries
+                ):
+                    last_exc = exc
+                    await asyncio.sleep(self._base_delay * (2**attempt))
+                    continue
+                raise
+        raise last_exc  # type: ignore[misc]
 
     async def _search(
         self,
@@ -40,10 +91,9 @@ class HubSpotClient:
         }
         if properties:
             body["properties"] = properties
-        resp = await self._client.post(
-            f"/crm/v3/objects/{object_type}/search", json=body
+        resp = await self._request_with_retry(
+            "POST", f"/crm/v3/objects/{object_type}/search", json=body
         )
-        resp.raise_for_status()
         return resp.json().get("results", [])
 
     async def search_contacts_by_email(self, email: str) -> list[dict]:
@@ -67,33 +117,31 @@ class HubSpotClient:
         )
 
     async def get_contact(self, contact_id: str) -> dict:
-        resp = await self._client.get(
+        resp = await self._request_with_retry(
+            "GET",
             f"/crm/v3/objects/contacts/{contact_id}",
             params={"properties": ",".join(CONTACT_PROPERTIES)},
         )
-        resp.raise_for_status()
         return resp.json()
 
     async def create_contact(self, properties: dict) -> dict:
-        resp = await self._client.post(
-            "/crm/v3/objects/contacts", json={"properties": properties}
+        resp = await self._request_with_retry(
+            "POST", "/crm/v3/objects/contacts", json={"properties": properties}
         )
-        resp.raise_for_status()
         return resp.json()
 
     async def update_contact(self, contact_id: str, properties: dict) -> dict:
-        resp = await self._client.patch(
+        resp = await self._request_with_retry(
+            "PATCH",
             f"/crm/v3/objects/contacts/{contact_id}",
             json={"properties": properties},
         )
-        resp.raise_for_status()
         return resp.json()
 
     async def create_company(self, properties: dict) -> dict:
-        resp = await self._client.post(
-            "/crm/v3/objects/companies", json={"properties": properties}
+        resp = await self._request_with_retry(
+            "POST", "/crm/v3/objects/companies", json={"properties": properties}
         )
-        resp.raise_for_status()
         return resp.json()
 
     async def search_companies_by_domain(self, domain: str) -> list[dict]:
@@ -106,10 +154,10 @@ class HubSpotClient:
     async def associate_contact_to_company(
         self, contact_id: str, company_id: str
     ) -> None:
-        resp = await self._client.put(
-            f"/crm/v3/objects/contacts/{contact_id}/associations/companies/{company_id}/default"
+        await self._request_with_retry(
+            "PUT",
+            f"/crm/v3/objects/contacts/{contact_id}/associations/companies/{company_id}/default",
         )
-        resp.raise_for_status()
 
     def build_contact_url(self, contact_id: str) -> str:
         return (

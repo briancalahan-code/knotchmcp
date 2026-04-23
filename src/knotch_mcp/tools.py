@@ -31,6 +31,51 @@ def _is_domain(company: str) -> bool:
     return "." in company
 
 
+def _is_phantom(person: dict) -> bool:
+    """True when Apollo returned an ID but no real data."""
+    if not person:
+        return True
+    org = person.get("organization") or {}
+    return not any(
+        [
+            person.get("email"),
+            person.get("title"),
+            person.get("linkedin_url"),
+            org.get("name"),
+        ]
+    )
+
+
+def _is_thin(person: dict) -> bool:
+    """True when >=2 of (email, title, linkedin_url) are null."""
+    if not person:
+        return True
+    nulls = sum(
+        1
+        for f in [person.get("email"), person.get("title"), person.get("linkedin_url")]
+        if not f
+    )
+    return nulls >= 2
+
+
+def _company_matches(
+    person: dict, requested: str, domains: list[tuple[str, str]]
+) -> bool:
+    """Check if a person's company plausibly matches the requested company."""
+    org = person.get("organization") or {}
+    pname = (org.get("name") or "").lower()
+    pdomain = (org.get("primary_domain") or "").lower()
+    req = requested.lower()
+    if req and pname and (req in pname or pname in req):
+        return True
+    known = {d.lower() for _, d in domains}
+    if pdomain and pdomain in known:
+        return True
+    if _is_domain(requested) and pdomain == req:
+        return True
+    return False
+
+
 def _extract_contact(person: dict) -> ContactResult:
     """Convert an Apollo person dict into a ContactResult."""
     org = person.get("organization") or {}
@@ -44,6 +89,25 @@ def _extract_contact(person: dict) -> ContactResult:
     parts = [p for p in [city, state, country] if p]
     location = ", ".join(parts) if parts else None
 
+    company = org.get("name")
+    company_domain = org.get("primary_domain")
+
+    _FREEMAIL = {
+        "gmail.com",
+        "yahoo.com",
+        "hotmail.com",
+        "outlook.com",
+        "icloud.com",
+        "aol.com",
+        "protonmail.com",
+    }
+    if not company and person.get("email") and "@" in person.get("email", ""):
+        email_domain = person["email"].split("@")[1].lower()
+        if email_domain not in _FREEMAIL:
+            if not company_domain:
+                company_domain = email_domain
+            company = email_domain.split(".")[0].capitalize()
+
     gaps: list[str] = []
     if not person.get("email"):
         gaps.append("email")
@@ -55,7 +119,7 @@ def _extract_contact(person: dict) -> ContactResult:
     return ContactResult(
         name=f"{person.get('first_name', '')} {person.get('last_name', '')}".strip(),
         title=person.get("title"),
-        company=org.get("name"),
+        company=company,
         email=person.get("email"),
         email_status=person.get("email_status"),
         linkedin_url=person.get("linkedin_url"),
@@ -63,7 +127,7 @@ def _extract_contact(person: dict) -> ContactResult:
         apollo_id=person.get("id"),
         phone=phone,
         phone_type=phone_type,
-        company_domain=org.get("primary_domain"),
+        company_domain=company_domain,
         sources=["apollo"],
         gaps=gaps,
     )
@@ -79,23 +143,41 @@ async def _check_hubspot(
     if not results and contact.linkedin_url:
         results = await hubspot.search_contacts_by_linkedin(contact.linkedin_url)
 
+    has_issues = contact.confidence == "low" or any(
+        kw in w for w in contact.warnings for kw in ("mismatch", "phantom", "thin")
+    )
+
     if results:
         hs_id = results[0]["id"]
         contact.hubspot_status = "found"
         contact.hubspot_contact_id = hs_id
         contact.hubspot_url = hubspot.build_contact_url(hs_id)
-        if contact.gaps:
+        if contact.gaps and not has_issues:
             contact.next_step = (
-                "STOP and ask the user: 'Would you like me to run Clay "
-                "enrichment to fill in the missing " + ", ".join(contact.gaps) + "?'"
+                "STOP and ask: 'Run Clay enrichment for missing "
+                + ", ".join(contact.gaps)
+                + "?'"
+            )
+        elif has_issues:
+            contact.next_step = (
+                "STOP: This result has low confidence ("
+                + "; ".join(contact.warnings)
+                + "). Ask the user to verify before proceeding."
             )
     else:
         contact.hubspot_status = "not_found"
         contact.suggested_actions.append("add_to_hubspot")
-        contact.next_step = (
-            "STOP and ask the user: 'Would you like me to add this contact "
-            "to HubSpot?' Do NOT run Clay or any other tool until the user answers."
-        )
+        if not has_issues:
+            contact.next_step = (
+                "STOP and ask: 'Would you like me to add this contact "
+                "to HubSpot?' Do NOT run Clay first."
+            )
+        else:
+            contact.next_step = (
+                "STOP: Low confidence result ("
+                + "; ".join(contact.warnings)
+                + "). Ask user to verify this is the right person before adding to HubSpot."
+            )
 
     if contact.gaps:
         contact.suggested_actions.append("clay_enrich for " + ", ".join(contact.gaps))
@@ -106,14 +188,29 @@ async def _check_hubspot(
 # ── Fallback helpers ────────────────────────────────────────────────
 
 
+_CONFIDENCE_BY_METHOD = {
+    "exact": "high",
+    "email": "high",
+    "linkedin": "high",
+    "nickname": "medium",
+    "alternate_domain": "medium",
+    "keyword_search": "medium",
+}
+
+
 async def _finalize_contact(
     person: dict,
     log_ctx: ToolLogContext,
     hubspot: HubSpotClient,
     match_method: str,
+    confidence: str | None = None,
+    warnings: list[str] | None = None,
 ) -> ContactResult:
     contact = _extract_contact(person)
     contact.match_method = match_method
+    contact.confidence = confidence or _CONFIDENCE_BY_METHOD.get(match_method, "low")
+    if warnings:
+        contact.warnings.extend(warnings)
     log_ctx.add_api_call("hubspot")
     contact = await _check_hubspot(contact, hubspot)
     logger.info(
@@ -219,6 +316,8 @@ async def _find_contact_by_details(
         log_ctx.add_api_call("apollo")
 
     primary_domain = domains[0][1] if domains else None
+    thin_fallback: dict | None = None
+    wrong_company_stash: dict | None = None
 
     # ── Tier 1: Exact match ──
     person = await apollo.people_match(
@@ -231,26 +330,44 @@ async def _find_contact_by_details(
     )
     log_ctx.add_api_call("apollo")
 
-    if person:
-        return await _finalize_contact(person, log_ctx, hubspot, "exact")
+    if person and not _is_phantom(person):
+        if not _company_matches(person, company, domains):
+            logger.info("exact match company mismatch, continuing cascade")
+            wrong_company_stash = person
+            person = None
+        elif _is_thin(person):
+            logger.info("exact match is thin, continuing cascade")
+            thin_fallback = person
+            person = None
+        else:
+            return await _finalize_contact(person, log_ctx, hubspot, "exact")
+    elif person:
+        logger.info("phantom record discarded: id=%s", person.get("id"))
+        person = None
 
     # ── Tier 2: Relaxed match (email, linkedin, nicknames, alt domains) ──
     person, method = await _try_relaxed_match(
         first_name, last_name, domains, email, linkedin_url, apollo, log_ctx
     )
-    if person:
-        return await _finalize_contact(person, log_ctx, hubspot, method)
+    if person and not _is_phantom(person):
+        if _is_thin(person) and not thin_fallback:
+            thin_fallback = person
+            person = None
+        elif not _is_thin(person):
+            return await _finalize_contact(person, log_ctx, hubspot, method)
+        else:
+            person = None
 
     # ── Tier 3: Keyword search ──
     candidates = await _try_keyword_search(
         first_name, last_name, primary_domain, company, apollo, log_ctx
     )
-    if candidates:
-        if len(candidates) == 1:
-            return await _finalize_contact(
-                candidates[0], log_ctx, hubspot, "keyword_search"
-            )
+    candidates = [c for c in candidates if not _is_phantom(c)]
+    matching = [c for c in candidates if _company_matches(c, company, domains)]
+    non_matching = [c for c in candidates if not _company_matches(c, company, domains)]
+    candidates = matching if matching else candidates
 
+    if candidates:
         best = await _finalize_contact(
             candidates[0], log_ctx, hubspot, "keyword_search"
         )
@@ -265,8 +382,51 @@ async def _find_contact_by_details(
                     "apollo_id": c.get("id"),
                 }
             )
-        best.alternate_matches = alt_summaries
+        for c in non_matching:
+            org = c.get("organization") or {}
+            alt_summaries.append(
+                {
+                    "name": f"{c.get('first_name', '')} {c.get('last_name', '')}".strip(),
+                    "title": c.get("title"),
+                    "company": org.get("name"),
+                    "apollo_id": c.get("id"),
+                }
+            )
+        if wrong_company_stash:
+            org = wrong_company_stash.get("organization") or {}
+            alt_summaries.append(
+                {
+                    "name": f"{wrong_company_stash.get('first_name', '')} {wrong_company_stash.get('last_name', '')}".strip(),
+                    "title": wrong_company_stash.get("title"),
+                    "company": org.get("name"),
+                    "apollo_id": wrong_company_stash.get("id"),
+                }
+            )
+        if alt_summaries:
+            best.alternate_matches = alt_summaries
         return best
+
+    # ── Thin fallback ──
+    if thin_fallback:
+        contact = await _finalize_contact(
+            thin_fallback,
+            log_ctx,
+            hubspot,
+            "exact",
+            confidence="low",
+            warnings=["thin_record: limited data available"],
+        )
+        if wrong_company_stash:
+            org = wrong_company_stash.get("organization") or {}
+            contact.alternate_matches = [
+                {
+                    "name": f"{wrong_company_stash.get('first_name', '')} {wrong_company_stash.get('last_name', '')}".strip(),
+                    "title": wrong_company_stash.get("title"),
+                    "company": org.get("name"),
+                    "apollo_id": wrong_company_stash.get("id"),
+                }
+            ]
+        return contact
 
     # ── No match ──
     contact = ContactResult(
@@ -275,6 +435,11 @@ async def _find_contact_by_details(
         sources=[],
         gaps=["no_match_after_fallback"],
         suggested_actions=["clay_enrich", "verify_spelling"],
+        confidence="low",
+        next_step=(
+            "STOP and ask the user: 'No match found. Would you like me to "
+            "try Clay enrichment, or could you verify the spelling?'"
+        ),
     )
     logger.info("tool completed (no match)", extra=log_ctx.finish())
     return contact
@@ -294,11 +459,14 @@ async def _find_contacts_by_role(
     """Apollo search by title/seniority, then parallel match + HubSpot check."""
     log_ctx = ToolLogContext("find_contacts_by_role")
 
-    domain = (
-        company if _is_domain(company) else await apollo.resolve_company_domain(company)
-    )
-    if not _is_domain(company):
+    domain: str | None = None
+    if _is_domain(company):
+        domain = company
+    else:
+        domain = await apollo.resolve_company_domain(company)
         log_ctx.add_api_call("apollo")
+        if not domain:
+            logger.warning("could not resolve domain for %s", company)
 
     seniority_list = [seniority] if seniority else None
     people_raw, total = await apollo.people_search(
@@ -308,6 +476,10 @@ async def _find_contacts_by_role(
         per_page=limit,
     )
     log_ctx.add_api_call("apollo")
+
+    if total == 0:
+        logger.info("tool completed (no results)", extra=log_ctx.finish())
+        return FindContactsResult(candidates=[], total_available=0)
 
     async def enrich_one(person_stub: dict) -> ContactResult:
         person = await apollo.people_match(
@@ -323,14 +495,37 @@ async def _find_contacts_by_role(
                 gaps=["enrichment_failed"],
             )
         contact = _extract_contact(person)
-        return await _check_hubspot(contact, hubspot)
+        try:
+            contact = await _check_hubspot(contact, hubspot)
+        except Exception as exc:
+            logger.warning("HubSpot check failed for %s: %s", contact.name, exc)
+            contact.hubspot_status = "error"
+            contact.warnings.append(f"HubSpot lookup failed: {type(exc).__name__}")
+        return contact
 
-    candidates = await asyncio.gather(*[enrich_one(p) for p in people_raw[:limit]])
+    candidates = list(
+        await asyncio.gather(*[enrich_one(p) for p in people_raw[:limit]])
+    )
     log_ctx.add_api_call("apollo")
     log_ctx.add_api_call("hubspot")
 
+    if domain:
+        filtered = [
+            c
+            for c in candidates
+            if c.company_domain and c.company_domain.lower() == domain.lower()
+        ]
+        if not filtered:
+            filtered = [
+                c
+                for c in candidates
+                if c.company and company.lower() in (c.company or "").lower()
+            ]
+        if filtered:
+            candidates = filtered
+
     logger.info("tool completed", extra=log_ctx.finish())
-    return FindContactsResult(candidates=list(candidates), total_available=total)
+    return FindContactsResult(candidates=candidates, total_available=total)
 
 
 # ── Tool 3: find_phone ───────────────────────────────────────────────
@@ -659,6 +854,13 @@ async def _clay_enrich(
                 if val:
                     enriched_fields[key] = str(val)
 
+            credits = callback_data.get("creditsUsed", 0)
+            warnings: list[str] = []
+            if credits > 0 and not enriched_fields:
+                warnings.append(
+                    f"Clay used {credits} credit(s) but returned no data for this person."
+                )
+
             logger.info(
                 "tool completed (callback received at %.0fs)",
                 elapsed,
@@ -666,11 +868,13 @@ async def _clay_enrich(
             )
             return ClayEnrichResult(
                 enriched_fields=enriched_fields,
-                credits_used=callback_data.get("creditsUsed", 0),
+                credits_used=credits,
                 task_status="completed",
+                warnings=warnings,
                 next_step=(
-                    "STOP and ask the user: 'Would you like me to add this "
-                    "contact to HubSpot?' Do NOT proceed without the user's answer."
+                    "STOP and ask: 'Add to HubSpot?'"
+                    if enriched_fields
+                    else "Clay returned no data. Ask user if they want to try different search terms."
                 ),
             )
 
@@ -712,13 +916,22 @@ async def _check_clay_result(
         if val:
             enriched_fields[key] = str(val)
 
+    credits = result.get("creditsUsed", 0)
+    warnings: list[str] = []
+    if credits > 0 and not enriched_fields:
+        warnings.append(
+            f"Clay used {credits} credit(s) but returned no data for this person."
+        )
+
     logger.info("tool completed", extra=log_ctx.finish())
     return ClayEnrichResult(
         enriched_fields=enriched_fields,
-        credits_used=result.get("creditsUsed", 0),
+        credits_used=credits,
         task_status="completed",
+        warnings=warnings,
         next_step=(
-            "STOP and ask the user: 'Would you like me to add this "
-            "contact to HubSpot?' Do NOT proceed without the user's answer."
+            "STOP and ask: 'Add to HubSpot?'"
+            if enriched_fields
+            else "Clay returned no data. Ask user if they want to try different search terms."
         ),
     )

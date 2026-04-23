@@ -31,6 +31,8 @@ class ContactResult(BaseModel):
     gaps: list[str] = []
     suggested_actions: list[str] = []
     next_step: str | None = None
+    confidence: str | None = None
+    warnings: list[str] = []
 
 
 # ── Tool Inputs ────────────────────────────────────────────────────
@@ -143,3 +145,4 @@ class ClayEnrichResult(BaseModel):
     credits_used: int = 0
     task_status: str = "completed"
     next_step: str | None = None
+    warnings: list[str] = []

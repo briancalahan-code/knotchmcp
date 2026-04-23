@@ -34,6 +34,9 @@ _clay = ClayClient(
 _hubspot = HubSpotClient(
     access_token=settings.hubspot_private_app_token,
     portal_id=settings.hubspot_portal_id,
+    max_retries=settings.hubspot_max_retries,
+    base_delay=settings.hubspot_retry_base_delay,
+    timeout=settings.hubspot_timeout,
 )
 
 
