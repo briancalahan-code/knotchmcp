@@ -455,6 +455,10 @@ async def test_multiple_candidates(mock_apollo, mock_hubspot, mock_clay):
     assert result.alternate_matches is not None
     assert len(result.alternate_matches) == 1
     assert result.alternate_matches[0]["company"] == "Acme"
+    assert "email" in result.alternate_matches[0]
+    assert "linkedin_url" in result.alternate_matches[0]
+    assert "lookup_contact" in result.next_step
+    assert "alternate" in result.next_step
 
 
 @pytest.mark.asyncio
@@ -973,3 +977,205 @@ def test_is_thin_false():
         is False
     )
     assert _is_thin({"email": "a@b.com", "title": "CEO"}) is False
+
+
+# ── v3: Company matching (fuzzy) ────────────────────────────────────
+
+
+def test_significant_words_strips_stopwords():
+    from knotch_mcp.tools import _significant_words
+
+    assert _significant_words("The Fox Valley") == {"fox", "valley"}
+    assert _significant_words("Association of Realtors") == {"realtors"}
+
+
+def test_significant_words_strips_punctuation():
+    from knotch_mcp.tools import _significant_words
+
+    result = _significant_words("REALTOR® Corp.")
+    assert "realtor" in result
+    assert "corp" not in result  # stopword
+
+
+def test_company_matches_word_overlap():
+    from knotch_mcp.tools import _company_matches
+
+    person = {
+        "organization": {
+            "name": "REALTOR® Association of the Fox Valley",
+            "primary_domain": "foxvalleyrealtors.com",
+        }
+    }
+    assert _company_matches(person, "Fox Valley Realtors", []) is True
+
+
+def test_company_matches_no_false_positive_single_word():
+    """Word-overlap needs >=2 words, so single shared word alone doesn't match."""
+    from knotch_mcp.tools import _company_matches
+
+    # "Valley Inc" vs "Fox Valley Realtors" — only 1 significant word overlap ("valley"),
+    # and neither is a substring of the other, so it should NOT match.
+    person = {
+        "organization": {"name": "Fox Valley Realtors", "primary_domain": "fvr.com"}
+    }
+    assert _company_matches(person, "Valley Inc", []) is False
+
+
+def test_company_matches_no_false_positive_unrelated():
+    from knotch_mcp.tools import _company_matches
+
+    person = {"organization": {"name": "Goldman Sachs", "primary_domain": "gs.com"}}
+    assert _company_matches(person, "JPMorgan Chase", []) is False
+
+
+def test_company_matches_substring_still_works():
+    from knotch_mcp.tools import _company_matches
+
+    person = {"organization": {"name": "Stripe, Inc.", "primary_domain": "stripe.com"}}
+    assert _company_matches(person, "Stripe", []) is True
+
+
+def test_company_matches_domain_still_works():
+    from knotch_mcp.tools import _company_matches
+
+    person = {"organization": {"name": "Unknown Co", "primary_domain": "stripe.com"}}
+    assert _company_matches(person, "Whatever", [("Stripe", "stripe.com")]) is True
+
+
+# ── v3: lookup_contact ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_lookup_contact_found(mock_apollo, mock_hubspot):
+    from knotch_mcp.tools import _lookup_contact
+
+    result = await _lookup_contact("abc123", mock_apollo, mock_hubspot)
+    assert isinstance(result, ContactResult)
+    assert result.match_method == "lookup"
+    assert result.confidence == "high"
+    assert result.email == "jane@stripe.com"
+    assert result.linkedin_url == "https://linkedin.com/in/janesmith"
+    mock_apollo.people_match.assert_called_once_with(apollo_id="abc123")
+
+
+@pytest.mark.asyncio
+async def test_lookup_contact_not_found(mock_apollo, mock_hubspot):
+    mock_apollo.people_match = AsyncMock(return_value=None)
+    from knotch_mcp.tools import _lookup_contact
+
+    result = await _lookup_contact("bad_id", mock_apollo, mock_hubspot)
+    assert result.confidence == "low"
+    assert "lookup_failed" in result.gaps
+
+
+@pytest.mark.asyncio
+async def test_lookup_contact_phantom(mock_apollo, mock_hubspot):
+    mock_apollo.people_match = AsyncMock(
+        return_value={
+            "id": "phantom1",
+            "email": None,
+            "title": None,
+            "linkedin_url": None,
+            "organization": {"name": None},
+        }
+    )
+    from knotch_mcp.tools import _lookup_contact
+
+    result = await _lookup_contact("phantom1", mock_apollo, mock_hubspot)
+    assert result.confidence == "low"
+    assert "lookup_failed" in result.gaps
+
+
+# ── v3: Rich alternates ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_alternate_match_has_rich_fields(mock_apollo, mock_hubspot):
+    """Alternates from keyword search should have email, linkedin, company_domain."""
+    p1 = _make_person(
+        first="Jane", last="Smith", org_name="Stripe", domain="stripe.com"
+    )
+    p2 = _make_person(first="Jane", last="Smith", org_name="Acme", domain="acme.com")
+
+    mock_apollo.people_match = AsyncMock(side_effect=[None, p1, p2])
+    mock_apollo.people_search.return_value = (
+        [
+            {"id": "kw1", "first_name": "Jane", "last_name": "Smith"},
+            {"id": "kw2", "first_name": "Jane", "last_name": "Smith"},
+        ],
+        2,
+    )
+    mock_apollo.resolve_company_domains.return_value = [("Stripe", "stripe.com")]
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Jane", "Smith", "Stripe", None, None, mock_apollo, mock_hubspot
+    )
+    alt = result.alternate_matches[0]
+    assert "email" in alt
+    assert "linkedin_url" in alt
+    assert "company_domain" in alt
+    assert alt["company"] == "Acme"
+
+
+# ── v3: next_step with alternates ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_next_step_mentions_alternates_count(mock_apollo, mock_hubspot):
+    """When 2 alternates exist, next_step should mention them."""
+    p1 = _make_person(
+        first="Jane", last="Smith", org_name="Stripe", domain="stripe.com"
+    )
+    p2 = _make_person(first="Jane", last="Smith", org_name="Acme", domain="acme.com")
+    p3 = _make_person(
+        first="Jane", last="Smith", org_name="Widgets", domain="widgets.com"
+    )
+
+    mock_apollo.people_match = AsyncMock(side_effect=[None, p1, p2, p3])
+    mock_apollo.people_search.return_value = (
+        [
+            {"id": "kw1", "first_name": "Jane", "last_name": "Smith"},
+            {"id": "kw2", "first_name": "Jane", "last_name": "Smith"},
+            {"id": "kw3", "first_name": "Jane", "last_name": "Smith"},
+        ],
+        3,
+    )
+    mock_apollo.resolve_company_domains.return_value = [("Stripe", "stripe.com")]
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Jane", "Smith", "Stripe", None, None, mock_apollo, mock_hubspot
+    )
+    assert "2 alternate matches" in result.next_step
+    assert "lookup_contact" in result.next_step
+
+
+@pytest.mark.asyncio
+async def test_no_match_surfaces_wrong_company_stash(mock_apollo, mock_hubspot):
+    """No-match path should surface wrong_company_stash as alternate."""
+    wrong_co = _make_person(
+        first="Jane", last="Smith", org_name="OpenAI", domain="openai.com"
+    )
+
+    call_count = 0
+
+    async def match_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return wrong_co
+        return None
+
+    mock_apollo.people_match = AsyncMock(side_effect=match_side_effect)
+    mock_apollo.people_search.return_value = ([], 0)
+    mock_apollo.resolve_company_domains.return_value = [("Google", "google.com")]
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Jane", "Smith", "Google", None, None, mock_apollo, mock_hubspot
+    )
+    assert result.alternate_matches is not None
+    assert len(result.alternate_matches) == 1
+    assert result.alternate_matches[0]["company"] == "OpenAI"
+    assert "lookup_contact" in result.next_step

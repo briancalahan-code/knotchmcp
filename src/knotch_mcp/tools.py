@@ -31,6 +31,44 @@ def _is_domain(company: str) -> bool:
     return "." in company
 
 
+_COMPANY_STOPWORDS = frozenset(
+    {
+        "the",
+        "of",
+        "and",
+        "a",
+        "an",
+        "in",
+        "for",
+        "inc",
+        "llc",
+        "corp",
+        "corporation",
+        "co",
+        "company",
+        "ltd",
+        "limited",
+        "group",
+        "plc",
+        "sa",
+        "gmbh",
+        "association",
+        "society",
+        "institute",
+        "foundation",
+    }
+)
+
+
+def _significant_words(name: str) -> set[str]:
+    """Extract significant words from a company name for fuzzy matching."""
+    words = {
+        w.rstrip(".,;:!?").replace("®", "").replace("™", "")
+        for w in name.lower().split()
+    }
+    return words - _COMPANY_STOPWORDS - {""}
+
+
 def _is_phantom(person: dict) -> bool:
     """True when Apollo returned an ID but no real data."""
     if not person:
@@ -68,12 +106,25 @@ def _company_matches(
     req = requested.lower()
     if req and pname and (req in pname or pname in req):
         return True
+    if req and pname:
+        req_words = _significant_words(req)
+        p_words = _significant_words(pname)
+        if req_words and p_words:
+            overlap = req_words & p_words
+            smaller = min(len(req_words), len(p_words))
+            if len(overlap) >= 2 and len(overlap) / smaller > 0.5:
+                return True
     known = {d.lower() for _, d in domains}
     if pdomain and pdomain in known:
         return True
     if _is_domain(requested) and pdomain == req:
         return True
     return False
+
+
+def _alt_summary(person: dict) -> dict:
+    """Build a rich alternate-match summary from a hydrated Apollo person."""
+    return _extract_contact(person).model_dump(exclude_none=True)
 
 
 def _extract_contact(person: dict) -> ContactResult:
@@ -192,6 +243,7 @@ _CONFIDENCE_BY_METHOD = {
     "exact": "high",
     "email": "high",
     "linkedin": "high",
+    "lookup": "high",
     "nickname": "medium",
     "alternate_domain": "medium",
     "keyword_search": "medium",
@@ -371,39 +423,19 @@ async def _find_contact_by_details(
         best = await _finalize_contact(
             candidates[0], log_ctx, hubspot, "keyword_search"
         )
-        alt_summaries = []
-        for c in candidates[1:]:
-            org = c.get("organization") or {}
-            alt_summaries.append(
-                {
-                    "name": f"{c.get('first_name', '')} {c.get('last_name', '')}".strip(),
-                    "title": c.get("title"),
-                    "company": org.get("name"),
-                    "apollo_id": c.get("id"),
-                }
-            )
-        for c in non_matching:
-            org = c.get("organization") or {}
-            alt_summaries.append(
-                {
-                    "name": f"{c.get('first_name', '')} {c.get('last_name', '')}".strip(),
-                    "title": c.get("title"),
-                    "company": org.get("name"),
-                    "apollo_id": c.get("id"),
-                }
-            )
+        alt_summaries = [_alt_summary(c) for c in candidates[1:]]
+        alt_summaries.extend(_alt_summary(c) for c in non_matching)
         if wrong_company_stash:
-            org = wrong_company_stash.get("organization") or {}
-            alt_summaries.append(
-                {
-                    "name": f"{wrong_company_stash.get('first_name', '')} {wrong_company_stash.get('last_name', '')}".strip(),
-                    "title": wrong_company_stash.get("title"),
-                    "company": org.get("name"),
-                    "apollo_id": wrong_company_stash.get("id"),
-                }
-            )
+            alt_summaries.append(_alt_summary(wrong_company_stash))
         if alt_summaries:
             best.alternate_matches = alt_summaries
+            n = len(alt_summaries)
+            best.next_step = (
+                f"STOP and present this result AND the {n} alternate match"
+                f"{'es' if n > 1 else ''} to the user. Ask: 'Is this the right "
+                "person, or would you like me to look up one of the alternates?' "
+                "If they pick an alternate, use lookup_contact with the apollo_id."
+            )
         return best
 
     # ── Thin fallback ──
@@ -417,15 +449,13 @@ async def _find_contact_by_details(
             warnings=["thin_record: limited data available"],
         )
         if wrong_company_stash:
-            org = wrong_company_stash.get("organization") or {}
-            contact.alternate_matches = [
-                {
-                    "name": f"{wrong_company_stash.get('first_name', '')} {wrong_company_stash.get('last_name', '')}".strip(),
-                    "title": wrong_company_stash.get("title"),
-                    "company": org.get("name"),
-                    "apollo_id": wrong_company_stash.get("id"),
-                }
-            ]
+            contact.alternate_matches = [_alt_summary(wrong_company_stash)]
+            contact.next_step = (
+                "STOP and present this result AND the 1 alternate match "
+                "to the user. Ask: 'Is this the right person, or would you "
+                "like me to look up the alternate?' "
+                "If they pick the alternate, use lookup_contact with the apollo_id."
+            )
         return contact
 
     # ── No match ──
@@ -441,6 +471,13 @@ async def _find_contact_by_details(
             "try Clay enrichment, or could you verify the spelling?'"
         ),
     )
+    if wrong_company_stash:
+        contact.alternate_matches = [_alt_summary(wrong_company_stash)]
+        contact.next_step = (
+            "STOP: No exact match, but found 1 possible match at a different "
+            "company. Present the alternate to the user. Ask: 'Is this the "
+            "person you meant?' If yes, use lookup_contact with the apollo_id."
+        )
     logger.info("tool completed (no match)", extra=log_ctx.finish())
     return contact
 
@@ -578,6 +615,34 @@ async def _find_phone(
 
     logger.info("tool completed", extra=log_ctx.finish())
     return FindPhoneResult(found=False, source="apollo", suggested_action="clay_enrich")
+
+
+# ── Tool 3b: lookup_contact ─────────────────────────────────────────
+
+
+async def _lookup_contact(
+    apollo_id: str,
+    apollo: ApolloClient,
+    hubspot: HubSpotClient,
+) -> ContactResult:
+    """Look up a single contact by Apollo ID, returning full data + HubSpot check."""
+    log_ctx = ToolLogContext("lookup_contact")
+    person = await apollo.people_match(apollo_id=apollo_id)
+    log_ctx.add_api_call("apollo")
+
+    if not person or _is_phantom(person):
+        logger.info("tool completed (not found)", extra=log_ctx.finish())
+        return ContactResult(
+            name="",
+            sources=[],
+            gaps=["lookup_failed"],
+            confidence="low",
+            next_step="Apollo ID not found. Try find_contact_by_details instead.",
+        )
+
+    return await _finalize_contact(
+        person, log_ctx, hubspot, "lookup", confidence="high"
+    )
 
 
 # ── Tool 4: enrich_contact ───────────────────────────────────────────

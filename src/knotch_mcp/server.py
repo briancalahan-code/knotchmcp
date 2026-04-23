@@ -16,6 +16,7 @@ from knotch_mcp.tools import (
     _find_contact_by_details,
     _find_contacts_by_role,
     _find_phone,
+    _lookup_contact,
 )
 
 logger = get_logger("knotch_mcp.server")
@@ -110,6 +111,18 @@ async def find_phone(
     result = await _find_phone(
         _clean(apollo_id), _clean(email), _clean(linkedin_url), _clean(name), _apollo
     )
+    return result.model_dump()
+
+
+@mcp.tool()
+async def lookup_contact(apollo_id: str) -> dict:
+    """Look up a contact by Apollo ID. Use this when find_contact_by_details
+    returned alternate_matches and the user selected one. Returns the full
+    contact record with HubSpot status check.
+
+    WORKFLOW: After showing the result, follow the same flow as
+    find_contact_by_details — offer HubSpot add, then Clay enrichment."""
+    result = await _lookup_contact(apollo_id, _apollo, _hubspot)
     return result.model_dump()
 
 
