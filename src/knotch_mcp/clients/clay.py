@@ -49,7 +49,7 @@ class ClayClient:
             payload["linkedinUrl"] = linkedin_url
         headers: dict[str, str] = {}
         if self._webhook_token:
-            headers["Authorization"] = f"Bearer {self._webhook_token}"
+            headers["x-clay-webhook-auth"] = self._webhook_token
 
         try:
             resp = await self._client.post(
