@@ -31,7 +31,10 @@ async def health(request: Request) -> JSONResponse:
 
 async def clay_callback(request: Request) -> JSONResponse:
     data = await request.json()
+    print(f"[clay_callback] received: {data}")
+    print(f"[clay_callback] pending keys: {list(_clay._pending.keys())}")
     accepted = _clay.receive_callback(data)
+    print(f"[clay_callback] accepted: {accepted}")
     if accepted:
         return JSONResponse({"status": "ok"})
     return JSONResponse({"status": "ignored"}, status_code=404)
