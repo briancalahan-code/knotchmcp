@@ -20,7 +20,7 @@ from knotch_mcp.tools import (
 logger = get_logger("knotch_mcp.server")
 settings = Settings()
 
-mcp = FastMCP("KnotchMCP")
+mcp = FastMCP("KnotchMCP", host="0.0.0.0")
 
 _rate_limiter = TokenBucket(
     rate=settings.apollo_rate_limit / 60.0, capacity=settings.apollo_rate_limit

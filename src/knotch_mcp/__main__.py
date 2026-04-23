@@ -23,7 +23,6 @@ async def clay_callback(request: Request) -> JSONResponse:
 def main():
     transport = "sse" if "--http" in sys.argv else "stdio"
     if transport == "sse":
-        mcp.settings.host = "0.0.0.0"
         mcp.settings.port = settings.port
 
         sse_app = mcp.sse_app()
