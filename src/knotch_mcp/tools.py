@@ -8,7 +8,6 @@ forward to these functions with the appropriate client instances.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 from knotch_mcp.clients.apollo import ApolloClient
 from knotch_mcp.clients.clay import ClayClient
@@ -451,10 +450,6 @@ async def _add_to_hubspot(
 # ── Tool 6: clay_enrich ─────────────────────────────────────────────
 
 
-CLAY_POLL_INTERVAL = 5.0
-CLAY_POLL_TIMEOUT = 120.0
-
-
 async def _clay_enrich(
     first_name: str,
     last_name: str,
@@ -462,10 +457,8 @@ async def _clay_enrich(
     requested_data: list[str],
     clay: ClayClient,
     linkedin_url: str | None = None,
-    report_progress: Any = None,
 ) -> ClayEnrichResult:
-    """Trigger Clay enrichment and wait for the callback with progress updates.
-    Falls back to returning a correlationId if the callback doesn't arrive in time."""
+    """Fire Clay webhook and return immediately with a correlationId."""
     log_ctx = ToolLogContext("clay_enrich")
 
     if not clay.configured:
@@ -486,45 +479,21 @@ async def _clay_enrich(
     log_ctx.add_api_call("clay")
 
     status = result.get("status", "unknown")
-    if status != "submitted":
-        logger.info("tool completed (webhook failed)", extra=log_ctx.finish())
+
+    if status == "submitted":
+        correlation_id = result.get("correlationId", "")
+        logger.info("tool completed (submitted)", extra=log_ctx.finish())
         return ClayEnrichResult(
-            enriched_fields={},
+            enriched_fields={"correlationId": correlation_id},
             credits_used=0,
-            task_status=status,
+            task_status="submitted",
         )
 
-    correlation_id = result.get("correlationId", "")
-
-    elapsed = 0.0
-    while elapsed < CLAY_POLL_TIMEOUT:
-        await asyncio.sleep(CLAY_POLL_INTERVAL)
-        elapsed += CLAY_POLL_INTERVAL
-
-        if report_progress:
-            await report_progress(elapsed, CLAY_POLL_TIMEOUT)
-
-        callback_data = clay.peek_result(correlation_id)
-        if callback_data is not None:
-            clay.get_result(correlation_id)
-            enriched_fields: dict[str, str] = {}
-            for key in ("email", "phone", "linkedinUrl", "title", "emailStatus"):
-                val = callback_data.get(key)
-                if val:
-                    enriched_fields[key] = str(val)
-
-            logger.info("tool completed (callback received)", extra=log_ctx.finish())
-            return ClayEnrichResult(
-                enriched_fields=enriched_fields,
-                credits_used=callback_data.get("creditsUsed", 0),
-                task_status="completed",
-            )
-
-    logger.info("tool completed (poll timeout)", extra=log_ctx.finish())
+    logger.info("tool completed (%s)", status, extra=log_ctx.finish())
     return ClayEnrichResult(
-        enriched_fields={"correlationId": correlation_id},
+        enriched_fields={},
         credits_used=0,
-        task_status="timeout",
+        task_status=status,
     )
 
 
