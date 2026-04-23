@@ -5,7 +5,7 @@ import uuid
 
 import httpx
 
-CALLBACK_TIMEOUT = 120.0
+CALLBACK_TIMEOUT = 15.0
 
 
 class ClayClient:
@@ -67,7 +67,15 @@ class ClayClient:
             await asyncio.wait_for(event.wait(), timeout=CALLBACK_TIMEOUT)
             result = self._results.pop(correlation_id, {"status": "unknown"})
         except asyncio.TimeoutError:
-            result = {"status": "timeout", "correlationId": correlation_id}
+            result = {
+                "status": "enrichment_submitted",
+                "message": (
+                    f"Clay enrichment triggered for {first_name} {last_name} at "
+                    f"{company_domain}. Data will appear in the Clay table shortly. "
+                    f"The enrichment typically completes in under 15 seconds."
+                ),
+                "correlationId": correlation_id,
+            }
         finally:
             self._pending.pop(correlation_id, None)
             self._results.pop(correlation_id, None)

@@ -336,7 +336,10 @@ async def _enrich_contact(
             )
             log_ctx.add_api_call("clay")
 
-            if clay_result.get("status") == "completed":
+            clay_status = clay_result.get("status")
+            if clay_status == "enrichment_submitted":
+                sources.append("clay (submitted)")
+            elif clay_status == "completed":
                 sources.append("clay")
                 clay_contacts = clay_result.get("results", [])
                 if clay_contacts:
@@ -476,17 +479,21 @@ async def _clay_enrich(
     log_ctx.add_api_call("clay")
 
     enriched_fields: dict[str, str] = {}
-    if result.get("status") == "completed":
+    status = result.get("status", "unknown")
+
+    if status == "completed":
         contacts = result.get("results", [])
         if contacts:
             c = contacts[0]
             for key in ("email", "phone", "linkedinUrl", "title", "emailStatus"):
                 if c.get(key):
                     enriched_fields[key] = str(c[key])
+    elif status == "enrichment_submitted":
+        enriched_fields["_note"] = result.get("message", "Enrichment submitted to Clay")
 
     logger.info("tool completed", extra=log_ctx.finish())
     return ClayEnrichResult(
         enriched_fields=enriched_fields,
         credits_used=result.get("creditsUsed", 0),
-        task_status=result.get("status", "unknown"),
+        task_status=status,
     )
