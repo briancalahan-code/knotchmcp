@@ -37,18 +37,30 @@ _hubspot = HubSpotClient(
 )
 
 
+def _clean(val: str) -> str | None:
+    if not val or val.lower() == "null":
+        return None
+    return val
+
+
 @mcp.tool()
 async def find_contact_by_details(
     first_name: str,
     last_name: str,
     company: str,
-    email: str | None = None,
-    linkedin_url: str | None = None,
+    email: str = "",
+    linkedin_url: str = "",
 ) -> dict:
     """Find a contact by name and company. Searches Apollo for contact details
     and checks HubSpot for existing records. Returns gaps and suggested next actions."""
     result = await _find_contact_by_details(
-        first_name, last_name, company, email, linkedin_url, _apollo, _hubspot
+        first_name,
+        last_name,
+        company,
+        _clean(email),
+        _clean(linkedin_url),
+        _apollo,
+        _hubspot,
     )
     return result.model_dump()
 
@@ -57,29 +69,31 @@ async def find_contact_by_details(
 async def find_contacts_by_role(
     titles: list[str],
     company: str,
-    seniority: str | None = None,
+    seniority: str = "",
     limit: int = 3,
 ) -> dict:
     """Find contacts by job title at a company. Returns top candidates with
     HubSpot status. Seniority options: owner, founder, c_suite, partner, vp,
     head, director, manager, senior, entry, intern."""
     result = await _find_contacts_by_role(
-        titles, company, seniority, limit, _apollo, _hubspot
+        titles, company, _clean(seniority), limit, _apollo, _hubspot
     )
     return result.model_dump()
 
 
 @mcp.tool()
 async def find_phone(
-    apollo_id: str | None = None,
-    email: str | None = None,
-    linkedin_url: str | None = None,
-    name: str | None = None,
+    apollo_id: str = "",
+    email: str = "",
+    linkedin_url: str = "",
+    name: str = "",
 ) -> dict:
     """Find a contact's phone number. Provide at least one identifier:
     apollo_id, email, or linkedin_url + name. Returns cached phone data from
     Apollo. If not found, suggests clay_enrich as a follow-up."""
-    result = await _find_phone(apollo_id, email, linkedin_url, name, _apollo)
+    result = await _find_phone(
+        _clean(apollo_id), _clean(email), _clean(linkedin_url), _clean(name), _apollo
+    )
     return result.model_dump()
 
 
@@ -96,28 +110,28 @@ async def enrich_contact(hubspot_contact_id: str) -> dict:
 async def add_to_hubspot(
     first_name: str,
     last_name: str,
-    email: str | None = None,
-    title: str | None = None,
-    company: str | None = None,
-    company_domain: str | None = None,
-    linkedin_url: str | None = None,
-    location: str | None = None,
-    phone: str | None = None,
-    apollo_id: str | None = None,
+    email: str = "",
+    title: str = "",
+    company: str = "",
+    company_domain: str = "",
+    linkedin_url: str = "",
+    location: str = "",
+    phone: str = "",
+    apollo_id: str = "",
 ) -> dict:
     """Add a contact to HubSpot. Dedupes by email and LinkedIn URL first — updates
     if found, creates if new. Associates with the matching company by domain."""
     result = await _add_to_hubspot(
         first_name,
         last_name,
-        email,
-        title,
-        company,
-        company_domain,
-        linkedin_url,
-        location,
-        phone,
-        apollo_id,
+        _clean(email),
+        _clean(title),
+        _clean(company),
+        _clean(company_domain),
+        _clean(linkedin_url),
+        _clean(location),
+        _clean(phone),
+        _clean(apollo_id),
         _hubspot,
     )
     return result.model_dump()
@@ -129,7 +143,7 @@ async def clay_enrich(
     last_name: str,
     company_domain: str,
     requested_data: list[str] | None = None,
-    linkedin_url: str | None = None,
+    linkedin_url: str = "",
 ) -> dict:
     """Enrich a contact using Clay. Waits up to 50s for results. If the callback
     arrives in time, returns the enriched data directly. If it times out, returns
@@ -137,15 +151,20 @@ async def clay_enrich(
     requested_data options: phone, email. Pass linkedin_url if available."""
     data = requested_data or ["phone", "email"]
     result = await _clay_enrich(
-        first_name, last_name, company_domain, data, _clay, linkedin_url=linkedin_url
+        first_name,
+        last_name,
+        company_domain,
+        data,
+        _clay,
+        linkedin_url=_clean(linkedin_url),
     )
     return result.model_dump()
 
 
 @mcp.tool()
 async def check_clay_result(correlation_id: str) -> dict:
-    """Check if Clay enrichment results are ready. Call this ~90 seconds after
-    clay_enrich returned a correlationId. Returns the enriched data if the Clay
-    callback has arrived, or status 'pending' if still waiting."""
+    """Check if Clay enrichment results are ready. Call this after clay_enrich
+    returned a correlationId with status 'timeout'. Returns the enriched data
+    if the Clay callback has arrived, or status 'pending' if still waiting."""
     result = await _check_clay_result(correlation_id, _clay)
     return result.model_dump()
