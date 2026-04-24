@@ -146,3 +146,134 @@ class ClayEnrichResult(BaseModel):
     task_status: str = "completed"
     next_step: str | None = None
     warnings: list[str] = []
+
+
+# ── Deal Analysis ─────────────────────────────────────────────────
+
+
+class DealContactProfile(BaseModel):
+    contact_id: str
+    name: str
+    title: str | None = None
+    email: str | None = None
+    company: str | None = None
+    current_buying_role: str | None = None
+    persona: str | None = None
+    seniority: str | None = None
+    linkedin_url: str | None = None
+    owner_id: str | None = None
+    lead_status: str | None = None
+    lifecycle_stage: str | None = None
+    notes_count: int = 0
+    last_activity: str | None = None
+    engagement_level: str = "unknown"
+    on_deal: bool = True
+
+
+class ContactToAdd(BaseModel):
+    contact_id: str
+    name: str
+    title: str | None = None
+    email: str | None = None
+    recommended_role: str | None = None
+    evidence: list[str] = []
+    priority: str = "MEDIUM"
+
+
+class RoleAssignment(BaseModel):
+    contact_id: str
+    name: str
+    title: str | None = None
+    current_role: str | None = None
+    recommended_role: str
+    confidence: str = "MEDIUM"
+    evidence: list[str] = []
+    on_deal: bool = True
+
+
+class StageGapAnalysis(BaseModel):
+    current_stage: str
+    stage_label: str
+    required_roles: list[str] = []
+    filled_roles: list[str] = []
+    missing_roles: list[str] = []
+    contact_count: int = 0
+    minimum_contacts: int = 0
+    cold_contacts: list[str] = []
+    single_threaded: bool = False
+    multithreading_score: str = "unknown"
+
+
+class SPICEDElement(BaseModel):
+    element: str
+    label: str
+    status: str = "unknown"
+    evidence: list[str] = []
+    recommendations: list[str] = []
+
+
+class SPICEDAnalysis(BaseModel):
+    elements: list[SPICEDElement] = []
+    overall_score: str = "unknown"
+    strong_count: int = 0
+    partial_count: int = 0
+    missing_count: int = 0
+    summary: str = ""
+    recommendations: list[str] = []
+
+
+class RecommendedEdit(BaseModel):
+    edit_type: str
+    target_id: str
+    target_name: str
+    field: str | None = None
+    current_value: str | None = None
+    new_value: str | None = None
+    reason: str = ""
+
+
+class DealAnalysisResult(BaseModel):
+    deal_id: str
+    deal_name: str
+    deal_stage: str
+    stage_label: str
+    pipeline: str | None = None
+    amount: str | None = None
+    close_date: str | None = None
+    owner_id: str | None = None
+    deal_age_days: int | None = None
+    deal_url: str | None = None
+    activity_summary: dict = {}
+    contact_count: int = 0
+    stage_minimum: int = 0
+    deal_contacts: list[DealContactProfile] = []
+    contacts_to_add: list[ContactToAdd] = []
+    role_assignments: list[RoleAssignment] = []
+    stage_gap_analysis: StageGapAnalysis | None = None
+    spiced_analysis: SPICEDAnalysis | None = None
+    recommended_edits: list[RecommendedEdit] = []
+    open_questions: list[str] = []
+    warnings: list[str] = []
+    company_name: str | None = None
+    company_id: str | None = None
+    other_open_deals: list[dict] = []
+
+
+# ── Write Tool Results ────────────────────────────────────────────
+
+
+class UpdateResult(BaseModel):
+    object_type: str
+    object_id: str
+    updated_properties: list[str] = []
+    success: bool = True
+    error: str | None = None
+
+
+class AssociateResult(BaseModel):
+    from_type: str
+    from_id: str
+    to_type: str
+    to_id: str
+    success: bool = True
+    error: str | None = None

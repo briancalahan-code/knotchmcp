@@ -19,6 +19,65 @@ CONTACT_PROPERTIES = [
     "company",
 ]
 
+DEAL_CONTACT_PROPERTIES = [
+    "firstname",
+    "lastname",
+    "email",
+    "jobtitle",
+    "company",
+    "hs_buying_role",
+    "hs_persona",
+    "seniority_level__knotch_",
+    "hubspot_owner_id",
+    "notes_last_updated",
+    "num_notes",
+    "hs_linkedin_url",
+    "hs_lead_status",
+    "lifecyclestage",
+    "phone",
+]
+
+DEAL_PROPERTIES = [
+    "dealname",
+    "dealstage",
+    "pipeline",
+    "amount",
+    "closedate",
+    "hubspot_owner_id",
+    "hs_lastmodifieddate",
+    "num_associated_contacts",
+    "description",
+    "notes_last_updated",
+    "num_contacted_notes",
+    "createdate",
+]
+
+MEETING_PROPERTIES = [
+    "hs_meeting_title",
+    "hs_meeting_start_time",
+    "hs_meeting_outcome",
+    "hs_meeting_body",
+]
+
+EMAIL_PROPERTIES = [
+    "hs_email_subject",
+    "hs_timestamp",
+    "hs_email_direction",
+    "hs_email_from_email",
+    "hs_email_to_email",
+    "hs_email_text",
+]
+
+COMPANY_PROPERTIES = [
+    "name",
+    "domain",
+    "industry",
+    "numberofemployees",
+    "annualrevenue",
+    "hubspot_owner_id",
+    "description",
+]
+
 
 class HubSpotClient:
     def __init__(
@@ -159,10 +218,179 @@ class HubSpotClient:
             f"/crm/v3/objects/contacts/{contact_id}/associations/companies/{company_id}/default",
         )
 
+    # ── Deal methods ─────────────────────────────────────────────────
+
+    async def get_deal(self, deal_id: str, properties: list[str] | None = None) -> dict:
+        props = properties or DEAL_PROPERTIES
+        resp = await self._request_with_retry(
+            "GET",
+            f"/crm/v3/objects/deals/{deal_id}",
+            params={"properties": ",".join(props)},
+        )
+        return resp.json()
+
+    async def search_deals(self, name: str) -> list[dict]:
+        return await self._search(
+            "deals",
+            [
+                {
+                    "propertyName": "dealname",
+                    "operator": "CONTAINS_TOKEN",
+                    "value": name,
+                }
+            ],
+            properties=DEAL_PROPERTIES,
+        )
+
+    async def update_deal(self, deal_id: str, properties: dict) -> dict:
+        resp = await self._request_with_retry(
+            "PATCH",
+            f"/crm/v3/objects/deals/{deal_id}",
+            json={"properties": properties},
+        )
+        return resp.json()
+
+    async def search_deals_by_company(self, company_id: str) -> list[dict]:
+        body: dict = {
+            "filterGroups": [
+                {
+                    "filters": [
+                        {
+                            "propertyName": "associations.company",
+                            "operator": "EQ",
+                            "value": company_id,
+                        }
+                    ]
+                }
+            ],
+            "properties": ["dealname", "dealstage", "pipeline", "amount"],
+            "limit": 20,
+        }
+        resp = await self._request_with_retry(
+            "POST", "/crm/v3/objects/deals/search", json=body
+        )
+        return resp.json().get("results", [])
+
+    # ── Company methods ───────────────────────────────────────────────
+
+    async def get_company(
+        self, company_id: str, properties: list[str] | None = None
+    ) -> dict:
+        props = properties or COMPANY_PROPERTIES
+        resp = await self._request_with_retry(
+            "GET",
+            f"/crm/v3/objects/companies/{company_id}",
+            params={"properties": ",".join(props)},
+        )
+        return resp.json()
+
+    async def update_company(self, company_id: str, properties: dict) -> dict:
+        resp = await self._request_with_retry(
+            "PATCH",
+            f"/crm/v3/objects/companies/{company_id}",
+            json={"properties": properties},
+        )
+        return resp.json()
+
+    # ── Association methods (v4 API) ──────────────────────────────────
+
+    async def get_associations(
+        self, object_type: str, object_id: str, to_type: str
+    ) -> list[dict]:
+        resp = await self._request_with_retry(
+            "GET",
+            f"/crm/v4/objects/{object_type}/{object_id}/associations/{to_type}",
+        )
+        return resp.json().get("results", [])
+
+    async def associate_objects(
+        self,
+        from_type: str,
+        from_id: str,
+        to_type: str,
+        to_id: str,
+    ) -> None:
+        _ALLOWED_TYPES = {"contacts", "deals", "companies"}
+        if from_type not in _ALLOWED_TYPES or to_type not in _ALLOWED_TYPES:
+            raise ValueError(
+                f"Write scope limited to {_ALLOWED_TYPES}. "
+                f"Got from_type={from_type}, to_type={to_type}"
+            )
+        await self._request_with_retry(
+            "PUT",
+            f"/crm/v4/objects/{from_type}/{from_id}/associations/{to_type}/{to_id}",
+            json=[
+                {
+                    "associationCategory": "HUBSPOT_DEFINED",
+                    "associationTypeId": _association_type_id(from_type, to_type),
+                }
+            ],
+        )
+
+    # ── Batch methods ─────────────────────────────────────────────────
+
+    async def batch_read(
+        self, object_type: str, ids: list[str], properties: list[str]
+    ) -> list[dict]:
+        if not ids:
+            return []
+        results: list[dict] = []
+        for i in range(0, len(ids), 100):
+            chunk = ids[i : i + 100]
+            body = {
+                "inputs": [{"id": oid} for oid in chunk],
+                "properties": properties,
+            }
+            resp = await self._request_with_retry(
+                "POST",
+                f"/crm/v3/objects/{object_type}/batch/read",
+                json=body,
+            )
+            results.extend(resp.json().get("results", []))
+        return results
+
+    # ── Pipeline methods ──────────────────────────────────────────────
+
+    async def get_pipelines(self) -> list[dict]:
+        resp = await self._request_with_retry("GET", "/crm/v3/pipelines/deals")
+        return resp.json().get("results", [])
+
+    # ── Generic object fetch ──────────────────────────────────────────
+
+    async def get_object(
+        self, object_type: str, object_id: str, properties: list[str]
+    ) -> dict:
+        resp = await self._request_with_retry(
+            "GET",
+            f"/crm/v3/objects/{object_type}/{object_id}",
+            params={"properties": ",".join(properties)},
+        )
+        return resp.json()
+
+    # ── URL builders ──────────────────────────────────────────────────
+
     def build_contact_url(self, contact_id: str) -> str:
         return (
             f"https://app.hubspot.com/contacts/{self._portal_id}/contact/{contact_id}"
         )
 
+    def build_deal_url(self, deal_id: str) -> str:
+        return f"https://app.hubspot.com/contacts/{self._portal_id}/deal/{deal_id}"
+
     async def close(self) -> None:
         await self._client.aclose()
+
+
+def _association_type_id(from_type: str, to_type: str) -> int:
+    _MAP = {
+        ("contacts", "deals"): 4,
+        ("deals", "contacts"): 3,
+        ("contacts", "companies"): 1,
+        ("companies", "contacts"): 2,
+        ("deals", "companies"): 341,
+        ("companies", "deals"): 342,
+    }
+    key = (from_type, to_type)
+    if key not in _MAP:
+        raise ValueError(f"No association type mapping for {from_type} → {to_type}")
+    return _MAP[key]

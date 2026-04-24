@@ -16,11 +16,13 @@ from knotch_mcp.log import ToolLogContext, get_logger
 from knotch_mcp.nicknames import get_name_variants
 from knotch_mcp.models import (
     AddToHubSpotResult,
+    AssociateResult,
     ClayEnrichResult,
     ContactResult,
     EnrichContactResult,
     FindContactsResult,
     FindPhoneResult,
+    UpdateResult,
 )
 
 logger = get_logger("knotch_mcp.tools")
@@ -1011,4 +1013,83 @@ async def _check_clay_result(
             if enriched_fields
             else "Clay returned no data. Ask user if they want to try different search terms."
         ),
+    )
+
+
+# ── Write tools ──────────────────────────────────────────────────
+
+_WRITABLE_TYPES = {"contacts", "deals", "companies"}
+
+
+async def _update_object(
+    object_type: str,
+    object_id: str,
+    properties: dict,
+    hubspot: HubSpotClient,
+) -> UpdateResult:
+    """Update properties on a contact, deal, or company."""
+    log_ctx = ToolLogContext(f"update_{object_type}")
+
+    if object_type not in _WRITABLE_TYPES:
+        logger.info("tool completed (rejected)", extra=log_ctx.finish())
+        return UpdateResult(
+            object_type=object_type,
+            object_id=object_id,
+            success=False,
+            error=f"Write access limited to {_WRITABLE_TYPES}. Got: {object_type}",
+        )
+
+    try:
+        if object_type == "contacts":
+            await hubspot.update_contact(object_id, properties)
+        elif object_type == "deals":
+            await hubspot.update_deal(object_id, properties)
+        elif object_type == "companies":
+            await hubspot.update_company(object_id, properties)
+        log_ctx.add_api_call("hubspot")
+    except Exception as exc:
+        logger.warning("update failed: %s", exc, extra=log_ctx.finish())
+        return UpdateResult(
+            object_type=object_type,
+            object_id=object_id,
+            success=False,
+            error=str(exc),
+        )
+
+    logger.info("tool completed", extra=log_ctx.finish())
+    return UpdateResult(
+        object_type=object_type,
+        object_id=object_id,
+        updated_properties=list(properties.keys()),
+    )
+
+
+async def _associate_contact_to_deal(
+    contact_id: str,
+    deal_id: str,
+    hubspot: HubSpotClient,
+) -> AssociateResult:
+    """Associate a contact to a deal."""
+    log_ctx = ToolLogContext("associate_contact_to_deal")
+
+    try:
+        await hubspot.associate_objects("contacts", contact_id, "deals", deal_id)
+        log_ctx.add_api_call("hubspot")
+    except Exception as exc:
+        logger.warning("association failed: %s", exc, extra=log_ctx.finish())
+        return AssociateResult(
+            from_type="contacts",
+            from_id=contact_id,
+            to_type="deals",
+            to_id=deal_id,
+            success=False,
+            error=str(exc),
+        )
+
+    logger.info("tool completed", extra=log_ctx.finish())
+    return AssociateResult(
+        from_type="contacts",
+        from_id=contact_id,
+        to_type="deals",
+        to_id=deal_id,
     )

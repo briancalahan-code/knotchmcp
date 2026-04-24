@@ -8,8 +8,10 @@ from knotch_mcp.clients.hubspot import HubSpotClient
 from knotch_mcp.config import Settings
 from knotch_mcp.log import get_logger
 from knotch_mcp.rate_limit import TokenBucket
+from knotch_mcp.deal_analysis import _deal_analysis
 from knotch_mcp.tools import (
     _add_to_hubspot,
+    _associate_contact_to_deal,
     _check_clay_result,
     _clay_enrich,
     _enrich_contact,
@@ -17,6 +19,7 @@ from knotch_mcp.tools import (
     _find_contacts_by_role,
     _find_phone,
     _lookup_contact,
+    _update_object,
 )
 
 logger = get_logger("knotch_mcp.server")
@@ -198,4 +201,105 @@ async def check_clay_result(correlation_id: str) -> dict:
     returned a correlationId with status 'timeout'. Returns the enriched data
     if the Clay callback has arrived, or status 'pending' if still waiting."""
     result = await _check_clay_result(correlation_id, _clay)
+    return result.model_dump()
+
+
+@mcp.tool()
+async def deal_analysis(deal_id: str) -> dict:
+    """Analyze a HubSpot deal's buyer roles and engagement. Accepts a deal ID
+    (numeric) or deal name (text search). Returns a comprehensive analysis:
+
+    - Contacts currently on the deal vs. who SHOULD be (from meetings/emails)
+    - Buyer role recommendations for each contact (Champion, Economic Buyer, etc.)
+    - Stage-specific gaps against Knotch's SPICED/buying committee framework
+    - Recommended CRM edits (associations, role assignments, record cleanup)
+
+    This tool is READ-ONLY — it returns recommendations. Use
+    update_contact_properties, update_deal_properties, associate_contact_to_deal
+    to execute the recommended changes after user review.
+
+    WORKFLOW: Present the full analysis to the user. Wait for them to tell you
+    which changes to make. Then use the write tools to execute."""
+    result = await _deal_analysis(deal_id, _hubspot)
+    return result.model_dump()
+
+
+@mcp.tool()
+async def update_contact_properties(contact_id: str, properties: str) -> dict:
+    """Update properties on a HubSpot contact. Pass properties as a JSON string
+    of key-value pairs, e.g. '{"hs_buying_role": "Champion", "jobtitle": "VP Marketing"}'.
+
+    Common properties: hs_buying_role, jobtitle, lifecyclestage, hs_lead_status,
+    phone, email, firstname, lastname, company."""
+    import json
+
+    try:
+        props = json.loads(properties)
+    except json.JSONDecodeError as exc:
+        from knotch_mcp.models import UpdateResult
+
+        return UpdateResult(
+            object_type="contacts",
+            object_id=contact_id,
+            success=False,
+            error=f"Invalid JSON: {exc}",
+        ).model_dump()
+    result = await _update_object("contacts", contact_id, props, _hubspot)
+    return result.model_dump()
+
+
+@mcp.tool()
+async def update_deal_properties(deal_id: str, properties: str) -> dict:
+    """Update properties on a HubSpot deal. Pass properties as a JSON string
+    of key-value pairs, e.g. '{"dealstage": "closedwon", "amount": "50000"}'.
+
+    Common properties: dealname, dealstage, amount, closedate, description,
+    hubspot_owner_id."""
+    import json
+
+    try:
+        props = json.loads(properties)
+    except json.JSONDecodeError as exc:
+        from knotch_mcp.models import UpdateResult
+
+        return UpdateResult(
+            object_type="deals",
+            object_id=deal_id,
+            success=False,
+            error=f"Invalid JSON: {exc}",
+        ).model_dump()
+    result = await _update_object("deals", deal_id, props, _hubspot)
+    return result.model_dump()
+
+
+@mcp.tool()
+async def update_company_properties(company_id: str, properties: str) -> dict:
+    """Update properties on a HubSpot company. Pass properties as a JSON string
+    of key-value pairs, e.g. '{"industry": "Technology", "numberofemployees": "500"}'.
+
+    Common properties: name, domain, industry, numberofemployees, annualrevenue,
+    description."""
+    import json
+
+    try:
+        props = json.loads(properties)
+    except json.JSONDecodeError as exc:
+        from knotch_mcp.models import UpdateResult
+
+        return UpdateResult(
+            object_type="companies",
+            object_id=company_id,
+            success=False,
+            error=f"Invalid JSON: {exc}",
+        ).model_dump()
+    result = await _update_object("companies", company_id, props, _hubspot)
+    return result.model_dump()
+
+
+@mcp.tool()
+async def associate_contact_to_deal(contact_id: str, deal_id: str) -> dict:
+    """Associate a contact to a deal in HubSpot. Use this after deal_analysis
+    identifies contacts who attended meetings or appeared in emails but aren't
+    on the deal yet."""
+    result = await _associate_contact_to_deal(contact_id, deal_id, _hubspot)
     return result.model_dump()
