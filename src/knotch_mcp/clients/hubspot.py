@@ -349,6 +349,21 @@ class HubSpotClient:
             results.extend(resp.json().get("results", []))
         return results
 
+    # ── Owner methods ────────────────────────────────────────────────
+
+    async def get_owners(self) -> list[dict]:
+        resp = await self._request_with_retry("GET", "/crm/v3/owners")
+        return resp.json().get("results", [])
+
+    async def get_owner_emails(self) -> set[str]:
+        owners = await self.get_owners()
+        emails: set[str] = set()
+        for owner in owners:
+            email = owner.get("email", "")
+            if email:
+                emails.add(email.lower())
+        return emails
+
     # ── Pipeline methods ──────────────────────────────────────────────
 
     async def get_pipelines(self) -> list[dict]:

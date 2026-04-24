@@ -8,6 +8,8 @@ from knotch_mcp.deal_analysis import (
     _infer_role,
     _infer_role_from_title,
     _analyze_spiced,
+    _assess_spiced_gap,
+    _group_edits,
     _parse_signals,
     _resolve_stage_key,
     _build_contact_profile,
@@ -16,6 +18,7 @@ from knotch_mcp.deal_analysis import (
 from knotch_mcp.tools import _update_object, _associate_contact_to_deal
 from knotch_mcp.models import (
     DealAnalysisResult,
+    RecommendedEdit,
     RoleAssignment,
     UpdateResult,
     AssociateResult,
@@ -177,6 +180,11 @@ def mock_hubspot():
     # Company
     client.get_company = AsyncMock(return_value=_make_company())
     client.search_deals_by_company = AsyncMock(return_value=[])
+
+    # Owners (internal team) — rep@knotch.com is internal
+    client.get_owner_emails = AsyncMock(
+        return_value={"rep@knotch.com", "manager@knotch.com"}
+    )
 
     # Write methods
     client.update_contact = AsyncMock(return_value={"id": "201", "properties": {}})
@@ -868,3 +876,227 @@ async def test_associate_handles_exception(mock_hubspot):
     result = await _associate_contact_to_deal("204", "100", mock_hubspot)
     assert result.success is False
     assert "403" in result.error
+
+
+# ── Internal contact filtering ────────────────────────────────────
+
+
+class TestInternalContactFiltering:
+    def test_build_profile_marks_internal(self):
+        record = _make_contact("999", "Lee", "Fine", "AE", "lee@knotch.com")
+        profile = _build_contact_profile(
+            record, internal_emails={"lee@knotch.com", "manager@knotch.com"}
+        )
+        assert profile.is_internal is True
+
+    def test_build_profile_external_not_flagged(self):
+        record = _make_contact("201", "Jane", "Smith", "VP Marketing", "jane@acme.com")
+        profile = _build_contact_profile(record, internal_emails={"lee@knotch.com"})
+        assert profile.is_internal is False
+
+    def test_build_profile_no_internal_emails(self):
+        record = _make_contact("201", "Jane", "Smith", "VP Marketing", "jane@acme.com")
+        profile = _build_contact_profile(record)
+        assert profile.is_internal is False
+
+    @pytest.mark.asyncio
+    async def test_internal_contact_excluded_from_roles(self, mock_hubspot):
+        """Internal team members should not get buyer role recommendations."""
+        mock_hubspot.get_owner_emails = AsyncMock(return_value={"lee@knotch.com"})
+
+        def custom_batch_read(object_type, ids, properties):
+            if object_type == "contacts":
+                records = {
+                    "201": _make_contact(
+                        "201", "Jane", "Smith", "VP Marketing", "jane@acme.com"
+                    ),
+                    "204": {
+                        "id": "204",
+                        "properties": {
+                            "firstname": "Lee",
+                            "lastname": "Fine",
+                            "email": "lee@knotch.com",
+                            "jobtitle": "Account Executive",
+                            "company": "Knotch",
+                            "hs_buying_role": None,
+                            "hs_persona": None,
+                            "seniority_level__knotch_": None,
+                            "hubspot_owner_id": "owner-2",
+                            "notes_last_updated": "2026-04-20",
+                            "num_notes": "413",
+                            "hs_linkedin_url": None,
+                            "hs_lead_status": None,
+                            "lifecyclestage": None,
+                            "phone": None,
+                        },
+                    },
+                }
+                return [records[cid] for cid in ids if cid in records]
+            if object_type == "meetings":
+                return [_make_meeting("301")]
+            return []
+
+        mock_hubspot.batch_read = AsyncMock(side_effect=custom_batch_read)
+
+        def custom_assoc(object_type, object_id, to_type):
+            if object_type == "deals" and to_type == "contacts":
+                return [{"toObjectId": "201"}]
+            if object_type == "deals" and to_type == "meetings":
+                return [{"toObjectId": "301"}]
+            if object_type == "meetings" and to_type == "contacts":
+                return [{"toObjectId": "201"}, {"toObjectId": "204"}]
+            if object_type == "deals" and to_type == "emails":
+                return []
+            if object_type == "deals" and to_type == "companies":
+                return [{"toObjectId": "501"}]
+            return []
+
+        mock_hubspot.get_associations = AsyncMock(side_effect=custom_assoc)
+
+        result = await _deal_analysis("100", mock_hubspot)
+
+        role_names = [ra.name for ra in result.role_assignments]
+        assert "Lee Fine" not in role_names
+        assert "Jane Smith" in role_names
+
+        add_names = [c.name for c in result.contacts_to_add]
+        assert "Lee Fine" not in add_names
+
+
+# ── SPICED gap assessment ──────────────────────────────────────────
+
+
+class TestSpicedGapAssessment:
+    def test_both_deal_and_activity(self):
+        gap = _assess_spiced_gap(
+            "S", ["Company identified"], ["current state discussed"]
+        )
+        assert "both support" in gap
+
+    def test_activity_only(self):
+        gap = _assess_spiced_gap("P", [], ["pain point identified"])
+        assert "deal record doesn't reflect" in gap
+
+    def test_deal_only(self):
+        gap = _assess_spiced_gap("I", ["Deal amount: $50000"], [])
+        assert "no supporting signals" in gap.lower() or "Validate" in gap
+
+    def test_neither(self):
+        gap = _assess_spiced_gap("C", [], [])
+        assert "Needs discovery" in gap
+
+    def test_spiced_element_has_separate_evidence(self):
+        spiced = _analyze_spiced(
+            deal_props={"amount": "50000", "description": "Enterprise deal"},
+            company_name="Acme Corp",
+            meeting_texts=["We're struggling with manual processes and pain points"],
+            email_texts=[],
+            role_assignments=[],
+            deal_age_days=90,
+            other_open_deals=[],
+        )
+        s_elem = next(e for e in spiced.elements if e.element == "S")
+        assert len(s_elem.deal_record_evidence) > 0
+        assert s_elem.gap_assessment != ""
+
+        p_elem = next(e for e in spiced.elements if e.element == "P")
+        assert len(p_elem.activity_evidence) > 0
+        assert "deal record doesn't reflect" in p_elem.gap_assessment
+
+        i_elem = next(e for e in spiced.elements if e.element == "I")
+        assert any("$50000" in e for e in i_elem.deal_record_evidence)
+
+    @pytest.mark.asyncio
+    async def test_deal_analysis_spiced_has_gap_assessment(self, mock_hubspot):
+        result = await _deal_analysis("100", mock_hubspot)
+        assert result.spiced_analysis is not None
+        for elem in result.spiced_analysis.elements:
+            assert elem.gap_assessment != ""
+            assert isinstance(elem.deal_record_evidence, list)
+            assert isinstance(elem.activity_evidence, list)
+
+
+# ── Edit grouping ──────────────────────────────────────────────────
+
+
+class TestEditGrouping:
+    def test_groups_associations_and_roles(self):
+        edits = [
+            RecommendedEdit(
+                edit_type="associate_contact",
+                target_id="204",
+                target_name="Lynn Teo",
+                field="deal_association",
+                new_value="100",
+                reason="6 meetings",
+            ),
+            RecommendedEdit(
+                edit_type="associate_contact",
+                target_id="205",
+                target_name="Jill Perlberg",
+                field="deal_association",
+                new_value="100",
+                reason="6 meetings",
+            ),
+            RecommendedEdit(
+                edit_type="set_buyer_role",
+                target_id="201",
+                target_name="Jane Smith",
+                field="hs_buying_role",
+                new_value="Economic Buyer",
+                reason="VP Marketing",
+            ),
+            RecommendedEdit(
+                edit_type="set_buyer_role",
+                target_id="202",
+                target_name="Bob Jones",
+                field="hs_buying_role",
+                new_value="Technical Validator",
+                reason="CTO",
+            ),
+        ]
+        groups = _group_edits(edits)
+        assert len(groups) == 2
+
+        assoc_group = next(g for g in groups if g.category == "associations")
+        assert assoc_group.count == 2
+        assert "Lynn Teo" in assoc_group.prompt
+        assert "2 contacts" in assoc_group.prompt
+
+        role_group = next(g for g in groups if g.category == "role_assignments")
+        assert role_group.count == 2
+        assert "buyer roles" in role_group.prompt.lower()
+
+    def test_empty_edits_returns_empty_groups(self):
+        groups = _group_edits([])
+        assert groups == []
+
+    def test_only_roles(self):
+        edits = [
+            RecommendedEdit(
+                edit_type="set_buyer_role",
+                target_id="201",
+                target_name="Jane Smith",
+                field="hs_buying_role",
+                new_value="Champion",
+                reason="Title",
+            ),
+        ]
+        groups = _group_edits(edits)
+        assert len(groups) == 1
+        assert groups[0].category == "role_assignments"
+
+    @pytest.mark.asyncio
+    async def test_deal_analysis_has_edit_groups(self, mock_hubspot):
+        result = await _deal_analysis("100", mock_hubspot)
+        assert isinstance(result.edit_groups, list)
+        if result.recommended_edits:
+            assert len(result.edit_groups) > 0
+            for group in result.edit_groups:
+                assert group.category in (
+                    "associations",
+                    "role_assignments",
+                    "other_updates",
+                )
+                assert group.count > 0
+                assert group.prompt != ""

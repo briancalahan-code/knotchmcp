@@ -336,3 +336,41 @@ async def test_associate_objects(hubspot):
 async def test_associate_objects_rejects_invalid_type(hubspot):
     with pytest.raises(ValueError, match="Write scope limited"):
         await hubspot.associate_objects("contacts", "201", "workflows", "999")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_owners(hubspot):
+    respx.get("https://api.hubapi.com/crm/v3/owners").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": "1", "email": "lee@knotch.com", "firstName": "Lee"},
+                    {"id": "2", "email": "manager@knotch.com", "firstName": "Manager"},
+                ]
+            },
+        )
+    )
+    owners = await hubspot.get_owners()
+    assert len(owners) == 2
+    assert owners[0]["email"] == "lee@knotch.com"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_owner_emails(hubspot):
+    respx.get("https://api.hubapi.com/crm/v3/owners").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": "1", "email": "Lee@Knotch.com"},
+                    {"id": "2", "email": "manager@knotch.com"},
+                    {"id": "3", "email": ""},
+                ]
+            },
+        )
+    )
+    emails = await hubspot.get_owner_emails()
+    assert emails == {"lee@knotch.com", "manager@knotch.com"}

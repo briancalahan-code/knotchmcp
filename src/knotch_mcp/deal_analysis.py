@@ -22,6 +22,7 @@ from knotch_mcp.models import (
     ContactToAdd,
     DealAnalysisResult,
     DealContactProfile,
+    EditGroup,
     RecommendedEdit,
     RoleAssignment,
     SPICEDAnalysis,
@@ -416,32 +417,33 @@ def _analyze_spiced(
     deal_age_days: int | None,
     other_open_deals: list[dict],
 ) -> SPICEDAnalysis:
-    all_text = " ".join(meeting_texts + email_texts)
+    activity_text = " ".join(meeting_texts + email_texts)
     filled_roles = {ra.recommended_role for ra in role_assignments}
 
     elements: list[SPICEDElement] = []
 
     for key in ("S", "P", "I", "C", "E", "D"):
-        evidence: list[str] = []
+        deal_evidence: list[str] = []
+        activity_ev: list[str] = []
 
         for pattern, desc in _SPICED_SIGNALS.get(key, []):
-            if re.search(pattern, all_text, re.IGNORECASE):
-                evidence.append(desc)
+            if re.search(pattern, activity_text, re.IGNORECASE):
+                activity_ev.append(desc)
 
         if key == "S":
             if company_name:
-                evidence.append(f"Company identified: {company_name}")
+                deal_evidence.append(f"Company identified: {company_name}")
             if deal_props.get("description"):
-                evidence.append("Deal description populated")
+                deal_evidence.append("Deal description populated")
             if other_open_deals:
-                evidence.append(
+                deal_evidence.append(
                     f"{len(other_open_deals)} other open deal(s) — broader relationship"
                 )
 
         elif key == "I":
             amount = deal_props.get("amount")
             if amount and amount != "0":
-                evidence.append(f"Deal amount: ${amount}")
+                deal_evidence.append(f"Deal amount: ${amount}")
 
         elif key == "C":
             close_date = deal_props.get("closedate")
@@ -450,35 +452,44 @@ def _analyze_spiced(
                     cd = datetime.fromisoformat(close_date.replace("Z", "+00:00"))
                     days_until = (cd - datetime.now(timezone.utc)).days
                     if 0 < days_until <= 90:
-                        evidence.append(f"Close date in {days_until} days")
+                        deal_evidence.append(f"Close date in {days_until} days")
                     elif days_until <= 0:
-                        evidence.append("Close date has passed — deal may be stale")
+                        deal_evidence.append(
+                            "Close date has passed — deal may be stale"
+                        )
                 except (ValueError, TypeError):
                     pass
             if deal_age_days and deal_age_days > 180 and not close_date:
-                evidence.append(f"Deal is {deal_age_days} days old with no close date")
+                deal_evidence.append(
+                    f"Deal is {deal_age_days} days old with no close date"
+                )
 
         elif key == "E":
             if "Technical Validator" in filled_roles:
-                evidence.append(
+                activity_ev.append(
                     "Technical Validator identified — evaluation likely active"
                 )
 
         elif key == "D":
             if "Economic Buyer" in filled_roles:
-                evidence.append("Economic Buyer identified")
+                activity_ev.append("Economic Buyer identified")
             if "Blocker" in filled_roles:
-                evidence.append("Blocker identified — decision process mapped")
+                activity_ev.append("Blocker identified — decision process mapped")
             role_count = len(filled_roles - {"PERSONNEL_CHANGE"})
             if role_count >= 3:
-                evidence.append(f"{role_count} buyer roles identified — multi-threaded")
+                activity_ev.append(
+                    f"{role_count} buyer roles identified — multi-threaded"
+                )
 
-        if len(evidence) >= 2:
+        combined = deal_evidence + activity_ev
+        if len(combined) >= 2:
             status = "strong"
-        elif len(evidence) == 1:
+        elif len(combined) == 1:
             status = "partial"
         else:
             status = "missing"
+
+        gap = _assess_spiced_gap(key, deal_evidence, activity_ev)
 
         recs: list[str] = []
         if status in ("missing", "partial"):
@@ -489,7 +500,10 @@ def _analyze_spiced(
                 element=key,
                 label=_SPICED_LABELS[key],
                 status=status,
-                evidence=evidence,
+                deal_record_evidence=deal_evidence,
+                activity_evidence=activity_ev,
+                evidence=combined,
+                gap_assessment=gap,
                 recommendations=recs,
             )
         )
@@ -530,10 +544,32 @@ def _analyze_spiced(
     )
 
 
+def _assess_spiced_gap(
+    element_key: str,
+    deal_evidence: list[str],
+    activity_evidence: list[str],
+) -> str:
+    has_deal = len(deal_evidence) > 0
+    has_activity = len(activity_evidence) > 0
+
+    if has_deal and has_activity:
+        return "Deal record and activity both support this element."
+    elif has_activity and not has_deal:
+        label = _SPICED_LABELS[element_key]
+        return f"Activity shows {label.lower()} signals, but the deal record doesn't reflect this yet. Update the deal to capture what was discussed."
+    elif has_deal and not has_activity:
+        label = _SPICED_LABELS[element_key]
+        return f"Deal record has {label.lower()} info, but no supporting signals found in recent meetings/emails. Validate this is still current."
+    else:
+        return "No evidence found in deal record or activity. Needs discovery."
+
+
 # ── Contact profile builder ─────────────────────────────────────
 
 
-def _build_contact_profile(record: dict, on_deal: bool = True) -> DealContactProfile:
+def _build_contact_profile(
+    record: dict, on_deal: bool = True, internal_emails: set[str] | None = None
+) -> DealContactProfile:
     props = record.get("properties", {})
     first = props.get("firstname", "") or ""
     last = props.get("lastname", "") or ""
@@ -556,6 +592,11 @@ def _build_contact_profile(record: dict, on_deal: bool = True) -> DealContactPro
     elif notes_count > 0 or last_activity:
         engagement = "low"
 
+    is_internal = False
+    contact_email = (props.get("email") or "").lower()
+    if internal_emails and contact_email and contact_email in internal_emails:
+        is_internal = True
+
     return DealContactProfile(
         contact_id=record.get("id", ""),
         name=name or f"Contact {record.get('id', '?')}",
@@ -573,6 +614,7 @@ def _build_contact_profile(record: dict, on_deal: bool = True) -> DealContactPro
         last_activity=last_activity,
         engagement_level=engagement,
         on_deal=on_deal,
+        is_internal=is_internal,
     )
 
 
@@ -629,6 +671,14 @@ async def _deal_analysis(
         stage_key or "qualification", STAGE_REQUIREMENTS["qualification"]
     )
 
+    # ── Step 2b: Fetch internal team emails (HubSpot owners) ──
+    internal_emails: set[str] = set()
+    try:
+        internal_emails = await hubspot.get_owner_emails()
+        log_ctx.add_api_call("hubspot")
+    except Exception:
+        logger.warning("failed to fetch HubSpot owners — internal filtering disabled")
+
     # ── Step 3: Fetch associated contacts ──
     contact_assoc = await hubspot.get_associations("deals", resolved_id, "contacts")
     log_ctx.add_api_call("hubspot")
@@ -641,7 +691,10 @@ async def _deal_analysis(
             "contacts", deal_contact_ids, DEAL_CONTACT_PROPERTIES
         )
         log_ctx.add_api_call("hubspot")
-        deal_contacts = [_build_contact_profile(r) for r in contact_records]
+        deal_contacts = [
+            _build_contact_profile(r, internal_emails=internal_emails)
+            for r in contact_records
+        ]
 
     # ── Step 4: Fetch meeting associations and attendees ──
     meeting_assoc = await hubspot.get_associations("deals", resolved_id, "meetings")
@@ -765,7 +818,10 @@ async def _deal_analysis(
             )
             log_ctx.add_api_call("hubspot")
             gap_contacts = [
-                _build_contact_profile(r, on_deal=False) for r in gap_records
+                _build_contact_profile(
+                    r, on_deal=False, internal_emails=internal_emails
+                )
+                for r in gap_records
             ]
         except Exception:
             logger.warning("failed to fetch gap candidate contacts")
@@ -827,6 +883,10 @@ async def _deal_analysis(
         contact_email_map[cid] = True
 
     for contact in all_contacts:
+        # Skip internal team members from buyer role inference
+        if contact.is_internal:
+            continue
+
         inferred_role, confidence = _infer_role(
             contact.title, contact.persona, contact.seniority
         )
@@ -1024,6 +1084,9 @@ async def _deal_analysis(
             f"Contact count ({total_on_deal}) is below stage minimum ({min_contacts})."
         )
 
+    # ── Step 10: Group edits by category ──
+    edit_groups = _group_edits(recommended_edits)
+
     logger.info("tool completed", extra=log_ctx.finish())
     return DealAnalysisResult(
         deal_id=resolved_id,
@@ -1045,6 +1108,7 @@ async def _deal_analysis(
         stage_gap_analysis=stage_gap,
         spiced_analysis=spiced,
         recommended_edits=recommended_edits,
+        edit_groups=edit_groups,
         open_questions=open_questions,
         warnings=warnings,
         company_name=company_name,
@@ -1104,6 +1168,48 @@ async def _resolve_stage(
         logger.warning("failed to fetch pipeline definitions")
 
     return stage_id, False
+
+
+def _group_edits(edits: list[RecommendedEdit]) -> list[EditGroup]:
+    associations = [e for e in edits if e.edit_type == "associate_contact"]
+    roles = [e for e in edits if e.edit_type == "set_buyer_role"]
+    other = [
+        e for e in edits if e.edit_type not in ("associate_contact", "set_buyer_role")
+    ]
+
+    groups: list[EditGroup] = []
+    if associations:
+        names = [e.target_name for e in associations]
+        groups.append(
+            EditGroup(
+                category="associations",
+                label="Add contacts to deal",
+                edits=associations,
+                count=len(associations),
+                prompt=f"Would you like to add these {len(associations)} contacts to the deal? ({', '.join(names[:5])}{'...' if len(names) > 5 else ''})",
+            )
+        )
+    if roles:
+        groups.append(
+            EditGroup(
+                category="role_assignments",
+                label="Set buyer roles",
+                edits=roles,
+                count=len(roles),
+                prompt=f"Would you like to set buyer roles on these {len(roles)} contacts?",
+            )
+        )
+    if other:
+        groups.append(
+            EditGroup(
+                category="other_updates",
+                label="Other property updates",
+                edits=other,
+                count=len(other),
+                prompt=f"Would you like to apply these {len(other)} property updates?",
+            )
+        )
+    return groups
 
 
 def _calculate_priority(

@@ -168,6 +168,7 @@ class DealContactProfile(BaseModel):
     last_activity: str | None = None
     engagement_level: str = "unknown"
     on_deal: bool = True
+    is_internal: bool = False
 
 
 class ContactToAdd(BaseModel):
@@ -208,7 +209,10 @@ class SPICEDElement(BaseModel):
     element: str
     label: str
     status: str = "unknown"
+    deal_record_evidence: list[str] = []
+    activity_evidence: list[str] = []
     evidence: list[str] = []
+    gap_assessment: str = ""
     recommendations: list[str] = []
 
 
@@ -232,6 +236,14 @@ class RecommendedEdit(BaseModel):
     reason: str = ""
 
 
+class EditGroup(BaseModel):
+    category: str
+    label: str
+    edits: list[RecommendedEdit] = []
+    count: int = 0
+    prompt: str = ""
+
+
 class DealAnalysisResult(BaseModel):
     deal_id: str
     deal_name: str
@@ -252,6 +264,7 @@ class DealAnalysisResult(BaseModel):
     stage_gap_analysis: StageGapAnalysis | None = None
     spiced_analysis: SPICEDAnalysis | None = None
     recommended_edits: list[RecommendedEdit] = []
+    edit_groups: list[EditGroup] = []
     open_questions: list[str] = []
     warnings: list[str] = []
     company_name: str | None = None

@@ -212,14 +212,21 @@ async def deal_analysis(deal_id: str) -> dict:
     - Contacts currently on the deal vs. who SHOULD be (from meetings/emails)
     - Buyer role recommendations for each contact (Champion, Economic Buyer, etc.)
     - Stage-specific gaps against Knotch's SPICED/buying committee framework
-    - Recommended CRM edits (associations, role assignments, record cleanup)
+    - SPICED scorecard comparing what's on the deal record vs. what activity reveals
+    - Recommended CRM edits grouped by category (associations, roles, other)
+
+    Internal team members (HubSpot owners) are automatically excluded from buyer
+    role recommendations — only external contacts get role assignments.
 
     This tool is READ-ONLY — it returns recommendations. Use
     update_contact_properties, update_deal_properties, associate_contact_to_deal
     to execute the recommended changes after user review.
 
-    WORKFLOW: Present the full analysis to the user. Wait for them to tell you
-    which changes to make. Then use the write tools to execute."""
+    WORKFLOW: Present the full analysis. For SPICED, compare deal_record_evidence
+    vs activity_evidence and highlight the gap_assessment for each element.
+    For recommended changes, use edit_groups to present each category separately:
+    'Would you like to add these N contacts?' then 'Would you like to set these
+    M buyer roles?' — never lump all edits into one prompt."""
     result = await _deal_analysis(deal_id, _hubspot)
     return result.model_dump()
 
