@@ -23,25 +23,23 @@ async def test_enrich_contact_success(clay):
     respx.post("https://hooks.clay.com/test").mock(
         return_value=httpx.Response(200, json={"ok": True})
     )
+    result = await clay.enrich_contact("Jane", "Smith", "stripe.com")
+    assert result["status"] == "submitted"
+    assert "correlationId" in result
 
-    async def simulate_callback():
-        await asyncio.sleep(0.05)
-        for cid, evt in list(clay._pending.items()):
-            clay.receive_callback(
-                {
-                    "correlationId": cid,
-                    "status": "completed",
-                    "results": [{"contactName": "Jane Smith", "phone": "+14155551234"}],
-                    "creditsUsed": 3,
-                }
-            )
+    cid = result["correlationId"]
+    assert clay.peek_result(cid) is None
 
-    result, _ = await asyncio.gather(
-        clay.enrich_contact("Jane", "Smith", "stripe.com"),
-        simulate_callback(),
+    clay.receive_callback(
+        {
+            "correlationId": cid,
+            "Phone Number": "+14155551234",
+            "creditsUsed": 1,
+        }
     )
-    assert result["status"] == "completed"
-    assert result["results"][0]["phone"] == "+14155551234"
+    stored = clay.peek_result(cid)
+    assert stored is not None
+    assert stored["Phone Number"] == "+14155551234"
 
 
 @respx.mock
@@ -61,6 +59,11 @@ async def test_enrich_contact_not_configured():
     assert result["status"] == "not_configured"
 
 
-def test_receive_callback_unknown_id(clay):
-    assert clay.receive_callback({"correlationId": "unknown"}) is False
+def test_receive_callback_with_correlation_id_always_stored(clay):
+    assert clay.receive_callback({"correlationId": "unknown"}) is True
+    assert clay.peek_result("unknown") is not None
+
+
+def test_receive_callback_no_match_without_id(clay):
     assert clay.receive_callback({}) is False
+    assert clay.receive_callback({"firstName": "Nobody"}) is False

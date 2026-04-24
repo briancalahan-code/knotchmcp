@@ -27,6 +27,49 @@ from knotch_mcp.models import (
 
 logger = get_logger("knotch_mcp.tools")
 
+# ── Clay field extraction ────────────────────────────────────────
+
+_CLAY_SKIP_KEYS = frozenset(
+    {
+        "firstname",
+        "lastname",
+        "companydomain",
+        "requesteddata",
+        "correlationid",
+        "creditsused",
+    }
+)
+
+
+def _extract_clay_fields(callback_data: dict) -> dict[str, str]:
+    """Extract enrichment fields from Clay callback data.
+
+    Clay tables use user-defined column names, so we match flexibly
+    rather than requiring exact key names.
+    """
+
+    def _norm(key: str) -> str:
+        return key.lower().replace(" ", "").replace("_", "").replace("-", "")
+
+    fields: dict[str, str] = {}
+    for key, val in callback_data.items():
+        if not val:
+            continue
+        nk = _norm(key)
+        if nk in _CLAY_SKIP_KEYS:
+            continue
+        if "emailstatus" in nk or "emailverif" in nk or "emailvalid" in nk:
+            fields.setdefault("emailStatus", str(val))
+        elif "phone" in nk or "mobile" in nk or "directdial" in nk:
+            fields.setdefault("phone", str(val))
+        elif "email" in nk:
+            fields.setdefault("email", str(val))
+        elif "linkedin" in nk:
+            fields.setdefault("linkedinUrl", str(val))
+        elif nk in ("title", "jobtitle"):
+            fields.setdefault("title", str(val))
+    return fields
+
 
 def _is_domain(company: str) -> bool:
     """Return True if *company* looks like a domain (contains a dot)."""
@@ -927,11 +970,11 @@ async def _clay_enrich(
         callback_data = clay.peek_result(correlation_id)
         if callback_data is not None:
             clay.get_result(correlation_id)
-            enriched_fields: dict[str, str] = {}
-            for key in ("email", "phone", "linkedinUrl", "title", "emailStatus"):
-                val = callback_data.get(key)
-                if val:
-                    enriched_fields[key] = str(val)
+            logger.info(
+                "clay callback payload keys: %s",
+                list(callback_data.keys()),
+            )
+            enriched_fields = _extract_clay_fields(callback_data)
 
             credits = callback_data.get("creditsUsed", 0)
             warnings: list[str] = []
@@ -989,11 +1032,8 @@ async def _check_clay_result(
             task_status="pending",
         )
 
-    enriched_fields: dict[str, str] = {}
-    for key in ("email", "phone", "linkedinUrl", "title", "emailStatus"):
-        val = result.get(key)
-        if val:
-            enriched_fields[key] = str(val)
+    logger.info("clay callback payload keys: %s", list(result.keys()))
+    enriched_fields = _extract_clay_fields(result)
 
     credits = result.get("creditsUsed", 0)
     warnings: list[str] = []

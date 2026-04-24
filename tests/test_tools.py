@@ -315,6 +315,38 @@ async def test_clay_enrich_success(mock_apollo, mock_hubspot, mock_clay):
     assert "phone" in result.enriched_fields
 
 
+@pytest.mark.asyncio
+async def test_clay_enrich_nonstandard_column_names(
+    mock_apollo, mock_hubspot, mock_clay
+):
+    """Regression: Clay callback with 'Phone Number' key was returning empty enriched_fields."""
+    callback = {
+        "firstName": "Nate",
+        "lastName": "Bucholz",
+        "companyDomain": "cardlytics.com",
+        "correlationId": "corr-test",
+        "creditsUsed": 1,
+        "Phone Number": "+16506468182",
+        "Work Email": "nbucholz@cardlytics.com",
+    }
+    mock_clay.enrich_contact.return_value = {
+        "status": "submitted",
+        "correlationId": "corr-test",
+    }
+    mock_clay.peek_result = lambda cid: callback
+    mock_clay.get_result = lambda cid: callback
+    from knotch_mcp.tools import _clay_enrich
+
+    result = await _clay_enrich(
+        "Nate", "Bucholz", "cardlytics.com", ["phone", "email"], mock_clay
+    )
+    assert result.task_status == "completed"
+    assert result.enriched_fields["phone"] == "+16506468182"
+    assert result.enriched_fields["email"] == "nbucholz@cardlytics.com"
+    assert result.credits_used == 1
+    assert not result.warnings
+
+
 # ── Fallback cascade tests ─────────────────────────────────────────
 
 
@@ -1204,3 +1236,124 @@ async def test_no_match_surfaces_wrong_company_stash(mock_apollo, mock_hubspot):
     assert len(result.alternate_matches) == 1
     assert result.alternate_matches[0]["company"] == "OpenAI"
     assert "lookup_contact" in result.next_step
+
+
+# ── Clay field extraction tests ──────────────────────────────────
+
+
+class TestExtractClayFields:
+    def test_camel_case_keys(self):
+        from knotch_mcp.tools import _extract_clay_fields
+
+        data = {
+            "firstName": "Nate",
+            "lastName": "Bucholz",
+            "correlationId": "abc",
+            "creditsUsed": 1,
+            "phone": "+16506468182",
+            "email": "nate@example.com",
+        }
+        fields = _extract_clay_fields(data)
+        assert fields["phone"] == "+16506468182"
+        assert fields["email"] == "nate@example.com"
+
+    def test_spaced_column_names(self):
+        from knotch_mcp.tools import _extract_clay_fields
+
+        data = {
+            "firstName": "Nate",
+            "correlationId": "abc",
+            "creditsUsed": 1,
+            "Phone Number": "+16506468182",
+            "Work Email": "nate@cardlytics.com",
+            "Email Status": "verified",
+        }
+        fields = _extract_clay_fields(data)
+        assert fields["phone"] == "+16506468182"
+        assert fields["email"] == "nate@cardlytics.com"
+        assert fields["emailStatus"] == "verified"
+
+    def test_snake_case_keys(self):
+        from knotch_mcp.tools import _extract_clay_fields
+
+        data = {
+            "first_name": "Nate",
+            "correlation_id": "abc",
+            "credits_used": 1,
+            "phone_number": "+16506468182",
+            "linkedin_url": "https://linkedin.com/in/nate",
+        }
+        fields = _extract_clay_fields(data)
+        assert fields["phone"] == "+16506468182"
+        assert fields["linkedinUrl"] == "https://linkedin.com/in/nate"
+
+    def test_mobile_phone_column(self):
+        from knotch_mcp.tools import _extract_clay_fields
+
+        data = {
+            "correlationId": "abc",
+            "creditsUsed": 1,
+            "Mobile Phone": "+14155551234",
+        }
+        fields = _extract_clay_fields(data)
+        assert fields["phone"] == "+14155551234"
+
+    def test_direct_dial_column(self):
+        from knotch_mcp.tools import _extract_clay_fields
+
+        data = {
+            "correlationId": "abc",
+            "creditsUsed": 1,
+            "Direct Dial": "+14155551234",
+        }
+        fields = _extract_clay_fields(data)
+        assert fields["phone"] == "+14155551234"
+
+    def test_skips_input_keys(self):
+        from knotch_mcp.tools import _extract_clay_fields
+
+        data = {
+            "firstName": "Nate",
+            "lastName": "Bucholz",
+            "companyDomain": "cardlytics.com",
+            "requestedData": ["phone"],
+            "correlationId": "abc",
+            "creditsUsed": 1,
+        }
+        fields = _extract_clay_fields(data)
+        assert "firstName" not in fields
+        assert "companyDomain" not in fields
+        assert len(fields) == 0
+
+    def test_empty_values_skipped(self):
+        from knotch_mcp.tools import _extract_clay_fields
+
+        data = {
+            "correlationId": "abc",
+            "Phone Number": "",
+            "Work Email": None,
+        }
+        fields = _extract_clay_fields(data)
+        assert len(fields) == 0
+
+    def test_email_status_not_matched_as_email(self):
+        from knotch_mcp.tools import _extract_clay_fields
+
+        data = {
+            "correlationId": "abc",
+            "Email Verification Status": "valid",
+            "Work Email": "test@example.com",
+        }
+        fields = _extract_clay_fields(data)
+        assert fields["email"] == "test@example.com"
+        assert fields["emailStatus"] == "valid"
+
+    def test_job_title_column(self):
+        from knotch_mcp.tools import _extract_clay_fields
+
+        data = {
+            "correlationId": "abc",
+            "Job Title": "VP Engineering",
+        }
+        fields = _extract_clay_fields(data)
+        assert fields["title"] == "VP Engineering"
