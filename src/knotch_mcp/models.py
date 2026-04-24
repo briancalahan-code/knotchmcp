@@ -171,77 +171,34 @@ class DealContactProfile(BaseModel):
     is_internal: bool = False
 
 
-class ContactToAdd(BaseModel):
+class AttendeeInfo(BaseModel):
     contact_id: str
     name: str
     title: str | None = None
     email: str | None = None
-    recommended_role: str | None = None
-    evidence: list[str] = []
-    priority: str = "MEDIUM"
+    on_deal: bool = False
 
 
-class RoleAssignment(BaseModel):
-    contact_id: str
-    name: str
+class MeetingDetail(BaseModel):
+    id: str
     title: str | None = None
-    current_role: str | None = None
-    recommended_role: str
-    confidence: str = "MEDIUM"
-    evidence: list[str] = []
-    on_deal: bool = True
+    start_time: str | None = None
+    outcome: str | None = None
+    attendee_ids: list[str] = []
+    attendees: list[AttendeeInfo] = []
+    body: str = ""
 
 
-class StageGapAnalysis(BaseModel):
-    current_stage: str
-    stage_label: str
-    required_roles: list[str] = []
-    filled_roles: list[str] = []
-    missing_roles: list[str] = []
-    contact_count: int = 0
-    minimum_contacts: int = 0
-    cold_contacts: list[str] = []
-    single_threaded: bool = False
-    multithreading_score: str = "unknown"
-
-
-class SPICEDElement(BaseModel):
-    element: str
-    label: str
-    status: str = "unknown"
-    deal_record_evidence: list[str] = []
-    activity_evidence: list[str] = []
-    evidence: list[str] = []
-    gap_assessment: str = ""
-    recommendations: list[str] = []
-
-
-class SPICEDAnalysis(BaseModel):
-    elements: list[SPICEDElement] = []
-    overall_score: str = "unknown"
-    strong_count: int = 0
-    partial_count: int = 0
-    missing_count: int = 0
-    summary: str = ""
-    recommendations: list[str] = []
-
-
-class RecommendedEdit(BaseModel):
-    edit_type: str
-    target_id: str
-    target_name: str
-    field: str | None = None
-    current_value: str | None = None
-    new_value: str | None = None
-    reason: str = ""
-
-
-class EditGroup(BaseModel):
-    category: str
-    label: str
-    edits: list[RecommendedEdit] = []
-    count: int = 0
-    prompt: str = ""
+class EmailDetail(BaseModel):
+    id: str
+    subject: str | None = None
+    timestamp: str | None = None
+    direction: str | None = None
+    from_email: str | None = None
+    to_emails: list[str] = []
+    associated_contact_ids: list[str] = []
+    associated_contacts: list[AttendeeInfo] = []
+    body: str = ""
 
 
 class DealAnalysisResult(BaseModel):
@@ -255,21 +212,18 @@ class DealAnalysisResult(BaseModel):
     owner_id: str | None = None
     deal_age_days: int | None = None
     deal_url: str | None = None
-    activity_summary: dict = {}
-    contact_count: int = 0
-    stage_minimum: int = 0
-    deal_contacts: list[DealContactProfile] = []
-    contacts_to_add: list[ContactToAdd] = []
-    role_assignments: list[RoleAssignment] = []
-    stage_gap_analysis: StageGapAnalysis | None = None
-    spiced_analysis: SPICEDAnalysis | None = None
-    recommended_edits: list[RecommendedEdit] = []
-    edit_groups: list[EditGroup] = []
-    open_questions: list[str] = []
-    warnings: list[str] = []
+    deal_description: str | None = None
     company_name: str | None = None
     company_id: str | None = None
     other_open_deals: list[dict] = []
+    stage_requirements: dict = {}
+    deal_contacts: list[DealContactProfile] = []
+    gap_contacts: list[DealContactProfile] = []
+    internal_emails: list[str] = []
+    meetings: list[MeetingDetail] = []
+    emails: list[EmailDetail] = []
+    activity_summary: dict = {}
+    warnings: list[str] = []
 
 
 # ── Write Tool Results ────────────────────────────────────────────

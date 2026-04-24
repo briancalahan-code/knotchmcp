@@ -206,27 +206,22 @@ async def check_clay_result(correlation_id: str) -> dict:
 
 @mcp.tool()
 async def deal_analysis(deal_id: str) -> dict:
-    """Analyze a HubSpot deal's buyer roles and engagement. Accepts a deal ID
-    (numeric) or deal name (text search). Returns a comprehensive analysis:
+    """Fetch all HubSpot data for a deal in parallel. Accepts a deal ID (numeric)
+    or deal name (text search). Returns raw structured data for analysis:
 
-    - Contacts currently on the deal vs. who SHOULD be (from meetings/emails)
-    - Buyer role recommendations for each contact (Champion, Economic Buyer, etc.)
-    - Stage-specific gaps against Knotch's SPICED/buying committee framework
-    - SPICED scorecard comparing what's on the deal record vs. what activity reveals
-    - Recommended CRM edits grouped by category (associations, roles, other)
+    - Deal metadata (name, stage, amount, close date, age, description, URL)
+    - All contacts on the deal (with titles, engagement, current buyer roles, persona, seniority)
+    - Gap contacts (appeared in meetings/emails but NOT associated to the deal)
+    - Full meeting details (title, date, outcome, attendees with names, full body text)
+    - Full email details (from, to, subject, date, direction, associated contacts, full body text)
+    - Company context and other open deals
+    - Stage requirements for the current deal stage (Knotch framework)
+    - Internal team member emails (HubSpot portal owners)
 
-    Internal team members (HubSpot owners) are automatically excluded from buyer
-    role recommendations — only external contacts get role assignments.
-
-    This tool is READ-ONLY — it returns recommendations. Use
-    update_contact_properties, update_deal_properties, associate_contact_to_deal
-    to execute the recommended changes after user review.
-
-    WORKFLOW: Present the full analysis. For SPICED, compare deal_record_evidence
-    vs activity_evidence and highlight the gap_assessment for each element.
-    For recommended changes, use edit_groups to present each category separately:
-    'Would you like to add these N contacts?' then 'Would you like to set these
-    M buyer roles?' — never lump all edits into one prompt."""
+    This tool is a DATA FETCHER — it returns raw data, not analysis.
+    Use the deal-analysis skill to interpret the data and recommend changes.
+    Use update_contact_properties, update_deal_properties, associate_contact_to_deal
+    to push confirmed changes back to HubSpot."""
     result = await _deal_analysis(deal_id, _hubspot)
     return result.model_dump()
 
