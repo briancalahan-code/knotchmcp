@@ -54,22 +54,25 @@ def _clean(val: str) -> str | None:
 async def find_contact_by_details(
     first_name: str,
     last_name: str,
-    company: str,
+    company: str = "",
     email: str = "",
     linkedin_url: str = "",
 ) -> dict:
-    """Find a contact by name and company. Searches Apollo using exact match,
-    then falls back to nickname variants and keyword search if needed.
-    Checks HubSpot for existing records.
+    """Find a contact by name. Pass any combination of identifiers — more info
+    means better results. Company, email, and LinkedIn URL are all optional but
+    each one dramatically improves accuracy.
 
-    If match_method is not 'exact', confirm with the user that this is the
-    right person. If alternate_matches is present, show those candidates too.
+    Returns the best match with data quality checks, specific enrichment
+    recommendations, and alternate candidates when relevant. The result includes
+    warnings (company_changed, personal_email, email_risky, thin_record) and
+    suggested_actions tailored to what data is missing.
 
-    WORKFLOW: After showing the results, ALWAYS ask the user:
-    1. 'Is this the right person?' (if match_method is not 'exact')
-    2. 'Would you like me to add this contact to HubSpot?' (if hubspot_status is not_found)
-    3. 'Would you like me to run Clay enrichment for missing data?' (if there are gaps)
-    Do NOT skip straight to Clay — always offer HubSpot first."""
+    WORKFLOW — follow the result's next_step field, which adapts to the situation:
+    - company_changed → confirm the person moved companies before proceeding
+    - alternate_matches present → show all candidates, let user pick
+    - hubspot_status is not_found → offer to add to HubSpot
+    - suggested_actions has enrichment items → offer Clay/phone lookup for gaps
+    Do NOT skip steps or auto-proceed — always confirm with the user."""
     result = await _find_contact_by_details(
         first_name,
         last_name,

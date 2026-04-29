@@ -76,6 +76,23 @@ def _is_domain(company: str) -> bool:
     return "." in company
 
 
+_FREEMAIL_DOMAINS = frozenset(
+    {
+        "gmail.com",
+        "yahoo.com",
+        "hotmail.com",
+        "outlook.com",
+        "icloud.com",
+        "aol.com",
+        "protonmail.com",
+        "live.com",
+        "msn.com",
+        "ymail.com",
+        "me.com",
+        "mail.com",
+    }
+)
+
 _COMPANY_STOPWORDS = frozenset(
     {
         "the",
@@ -188,22 +205,10 @@ def _extract_contact(person: dict) -> ContactResult:
     company = org.get("name")
     company_domain = org.get("primary_domain")
 
-    _FREEMAIL = {
-        "gmail.com",
-        "yahoo.com",
-        "hotmail.com",
-        "outlook.com",
-        "icloud.com",
-        "aol.com",
-        "protonmail.com",
-    }
-
-    # Prefer email domain over org.primary_domain when they differ —
-    # Apollo org records often point to parent/legacy domains.
     if person.get("email") and "@" in person.get("email", ""):
         email_domain = person["email"].split("@")[1].lower()
         if (
-            email_domain not in _FREEMAIL
+            email_domain not in _FREEMAIL_DOMAINS
             and company_domain
             and email_domain != company_domain.lower()
         ):
@@ -211,7 +216,7 @@ def _extract_contact(person: dict) -> ContactResult:
 
     if not company and person.get("email") and "@" in person.get("email", ""):
         email_domain = person["email"].split("@")[1].lower()
-        if email_domain not in _FREEMAIL:
+        if email_domain not in _FREEMAIL_DOMAINS:
             if not company_domain:
                 company_domain = email_domain
             company = email_domain.split(".")[0].capitalize()
@@ -225,7 +230,7 @@ def _extract_contact(person: dict) -> ContactResult:
         gaps.append("phone")
 
     return ContactResult(
-        name=f"{person.get('first_name', '')} {person.get('last_name', '')}".strip(),
+        name=f"{person.get('first_name') or ''} {person.get('last_name') or ''}".strip(),
         title=person.get("title"),
         company=company,
         email=person.get("email"),
@@ -328,6 +333,77 @@ async def _finalize_contact(
     return contact
 
 
+def _qa_result(
+    contact: ContactResult,
+    searched_company: str | None,
+    had_email: bool,
+    had_linkedin: bool,
+) -> ContactResult:
+    """QA a contact result: validate data, replace generic suggestions with
+    specific enrichment recommendations, and add disambiguation guidance."""
+
+    contact.suggested_actions = [
+        a for a in contact.suggested_actions if not a.startswith("clay_enrich for ")
+    ]
+
+    if contact.email and "@" in contact.email:
+        email_domain = contact.email.split("@")[1].lower()
+        if email_domain in _FREEMAIL_DOMAINS:
+            contact.warnings.append(
+                f"personal_email: using {email_domain}, no corporate email on file"
+            )
+
+    if contact.email_status and contact.email_status not in ("verified", "valid"):
+        contact.warnings.append(
+            f"email_risky: status '{contact.email_status}' — may bounce"
+        )
+
+    if not contact.email:
+        if contact.company_domain:
+            contact.suggested_actions.append(
+                f"clay_enrich for email (domain: {contact.company_domain})"
+            )
+        else:
+            contact.suggested_actions.append(
+                "need company_domain to run clay_enrich for email"
+            )
+
+    if not contact.phone:
+        if contact.apollo_id:
+            contact.suggested_actions.append(
+                f"find_phone (apollo_id: {contact.apollo_id})"
+            )
+        if contact.company_domain:
+            contact.suggested_actions.append(
+                f"clay_enrich for phone (domain: {contact.company_domain})"
+            )
+
+    if contact.confidence in ("low", "medium"):
+        if not had_linkedin and not contact.linkedin_url:
+            contact.suggested_actions.append("provide LinkedIn URL to confirm identity")
+        if not had_email and not contact.email:
+            contact.suggested_actions.append("provide email for exact match")
+        if not searched_company:
+            contact.suggested_actions.append("provide company name for better results")
+
+    if any("company_changed" in w for w in contact.warnings):
+        moved_warning = next(w for w in contact.warnings if "company_changed" in w)
+        if contact.hubspot_status == "not_found":
+            contact.next_step = (
+                f"STOP: {moved_warning}. "
+                "Confirm with the user this is the right person, then offer "
+                "to add to HubSpot."
+            )
+        else:
+            contact.next_step = (
+                f"STOP: {moved_warning}. "
+                "Confirm with the user — check if their HubSpot record needs "
+                "a company update."
+            )
+
+    return contact
+
+
 async def _try_relaxed_match(
     first_name: str,
     last_name: str,
@@ -391,6 +467,10 @@ async def _try_keyword_search(
         log_ctx.add_api_call("apollo")
 
     if not people_raw:
+        people_raw, _ = await apollo.people_search(q_keywords=keywords, per_page=5)
+        log_ctx.add_api_call("apollo")
+
+    if not people_raw:
         return []
 
     enriched = []
@@ -408,18 +488,27 @@ async def _try_keyword_search(
 async def _find_contact_by_details(
     first_name: str,
     last_name: str,
-    company: str,
+    company: str | None,
     email: str | None,
     linkedin_url: str | None,
     apollo: ApolloClient,
     hubspot: HubSpotClient,
 ) -> ContactResult:
-    """Three-tier Apollo cascade: exact → relaxed → keyword search."""
+    """Three-tier Apollo cascade: exact → relaxed → keyword search.
+    Company is optional — without it, anchors on email/linkedin or
+    falls back to name-only keyword search."""
     log_ctx = ToolLogContext("find_contact_by_details")
+    had_email = bool(email)
+    had_linkedin = bool(linkedin_url)
+
+    def qa(contact: ContactResult) -> ContactResult:
+        return _qa_result(contact, company, had_email, had_linkedin)
 
     # ── Resolve company domain(s) ──
-    if _is_domain(company):
-        domains: list[tuple[str, str]] = [(company, company)]
+    if not company:
+        domains: list[tuple[str, str]] = []
+    elif _is_domain(company):
+        domains = [(company, company)]
     else:
         domains = await apollo.resolve_company_domains(company, limit=3)
         log_ctx.add_api_call("apollo")
@@ -433,15 +522,29 @@ async def _find_contact_by_details(
         first_name=first_name,
         last_name=last_name,
         domain=primary_domain,
-        organization_name=company if not _is_domain(company) else None,
+        organization_name=company if company and not _is_domain(company) else None,
         email=email,
         linkedin_url=linkedin_url,
     )
     log_ctx.add_api_call("apollo")
 
     if person and not _is_phantom(person):
-        if not _company_matches(person, company, domains):
-            logger.info("exact match company mismatch, continuing cascade")
+        if company and not _company_matches(person, company, domains):
+            current_org = (person.get("organization") or {}).get("name", "unknown")
+            if not _is_thin(person):
+                return qa(
+                    await _finalize_contact(
+                        person,
+                        log_ctx,
+                        hubspot,
+                        "exact",
+                        confidence="medium",
+                        warnings=[
+                            f"company_changed: now at {current_org}, searched {company}"
+                        ],
+                    )
+                )
+            logger.info("exact match company mismatch (thin), continuing cascade")
             wrong_company_stash = person
             person = None
         elif _is_thin(person):
@@ -449,7 +552,7 @@ async def _find_contact_by_details(
             thin_fallback = person
             person = None
         else:
-            return await _finalize_contact(person, log_ctx, hubspot, "exact")
+            return qa(await _finalize_contact(person, log_ctx, hubspot, "exact"))
     elif person:
         logger.info("phantom record discarded: id=%s", person.get("id"))
         person = None
@@ -463,18 +566,23 @@ async def _find_contact_by_details(
             thin_fallback = person
             person = None
         elif not _is_thin(person):
-            return await _finalize_contact(person, log_ctx, hubspot, method)
+            return qa(await _finalize_contact(person, log_ctx, hubspot, method))
         else:
             person = None
 
     # ── Tier 3: Keyword search ──
     candidates = await _try_keyword_search(
-        first_name, last_name, primary_domain, company, apollo, log_ctx
+        first_name, last_name, primary_domain, company or "", apollo, log_ctx
     )
     candidates = [c for c in candidates if not _is_phantom(c)]
-    matching = [c for c in candidates if _company_matches(c, company, domains)]
-    non_matching = [c for c in candidates if not _company_matches(c, company, domains)]
-    candidates = matching if matching else candidates
+    if company:
+        matching = [c for c in candidates if _company_matches(c, company, domains)]
+        non_matching = [
+            c for c in candidates if not _company_matches(c, company, domains)
+        ]
+        candidates = matching if matching else candidates
+    else:
+        non_matching = []
 
     if candidates:
         best = await _finalize_contact(
@@ -493,7 +601,7 @@ async def _find_contact_by_details(
                 "person, or would you like me to look up one of the alternates?' "
                 "If they pick an alternate, use lookup_contact with the apollo_id."
             )
-        return best
+        return qa(best)
 
     # ── Thin fallback ──
     if thin_fallback:
@@ -513,19 +621,33 @@ async def _find_contact_by_details(
                 "like me to look up the alternate?' "
                 "If they pick the alternate, use lookup_contact with the apollo_id."
             )
-        return contact
+        return qa(contact)
 
     # ── No match ──
+    no_match_actions: list[str] = ["verify_spelling"]
+    no_match_tips: list[str] = []
+    if not had_email:
+        no_match_tips.append("email")
+    if not had_linkedin:
+        no_match_tips.append("LinkedIn URL")
+    if not company:
+        no_match_tips.append("company name")
+    if no_match_tips:
+        no_match_actions.append(
+            "provide " + " or ".join(no_match_tips) + " for better matching"
+        )
+    no_match_actions.append("clay_enrich as last resort")
+
     contact = ContactResult(
         name=f"{first_name} {last_name}",
-        company=company,
+        company=company or None,
         sources=[],
-        gaps=["no_match_after_fallback"],
-        suggested_actions=["clay_enrich", "verify_spelling"],
+        gaps=["no_match"],
+        suggested_actions=no_match_actions,
         confidence="low",
         next_step=(
-            "STOP and ask the user: 'No match found. Would you like me to "
-            "try Clay enrichment, or could you verify the spelling?'"
+            "STOP and tell the user: 'No match found.' Then suggest: "
+            + "; ".join(no_match_actions)
         ),
     )
     if wrong_company_stash:
@@ -536,7 +658,7 @@ async def _find_contact_by_details(
             "person you meant?' If yes, use lookup_contact with the apollo_id."
         )
     logger.info("tool completed (no match)", extra=log_ctx.finish())
-    return contact
+    return qa(contact)
 
 
 # ── Tool 2: find_contacts_by_role ────────────────────────────────────
@@ -583,7 +705,7 @@ async def _find_contacts_by_role(
         )
         if not person:
             return ContactResult(
-                name=f"{person_stub.get('first_name', '')} {person_stub.get('last_name', '')}".strip(),
+                name=f"{person_stub.get('first_name') or ''} {person_stub.get('last_name') or ''}".strip(),
                 title=person_stub.get("title"),
                 sources=["apollo"],
                 gaps=["enrichment_failed"],

@@ -165,7 +165,7 @@ async def test_find_contact_not_found_in_apollo(mock_apollo, mock_hubspot, mock_
     )
     assert result.name == "Nobody Exists"
     assert result.sources == []
-    assert "no_match_after_fallback" in result.gaps
+    assert "no_match" in result.gaps
 
 
 @pytest.mark.asyncio
@@ -529,7 +529,7 @@ async def test_phantom_rejected_at_tier1(mock_apollo, mock_hubspot, mock_clay):
         "Zebulon", "Thornwhistle", "Salesforce", None, None, mock_apollo, mock_hubspot
     )
     assert result.match_method is None
-    assert "no_match_after_fallback" in result.gaps
+    assert "no_match" in result.gaps
 
 
 @pytest.mark.asyncio
@@ -572,56 +572,53 @@ async def test_phantom_rejected_at_tier2(mock_apollo, mock_hubspot, mock_clay):
 
 
 @pytest.mark.asyncio
-async def test_company_mismatch_continues_cascade(mock_apollo, mock_hubspot, mock_clay):
-    """Person at wrong company should not be returned as exact match."""
+async def test_company_mismatch_returns_with_warning(
+    mock_apollo, mock_hubspot, mock_clay
+):
+    """Non-thin person at wrong company should return as primary with company_changed warning."""
     wrong_company = _make_person(
         first="John", last="Smith", org_name="OpenAI", domain="openai.com"
     )
-    right_person = _make_person(
-        first="John", last="Smith", org_name="Google", domain="google.com"
-    )
 
-    call_count = 0
-
-    async def match_side_effect(**kwargs):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return wrong_company
-        if kwargs.get("apollo_id") == "kw1":
-            return right_person
-        return None
-
-    mock_apollo.people_match = AsyncMock(side_effect=match_side_effect)
+    mock_apollo.people_match = AsyncMock(return_value=wrong_company)
     mock_apollo.resolve_company_domains.return_value = [("Google", "google.com")]
-    mock_apollo.people_search.return_value = (
-        [{"id": "kw1", "first_name": "John", "last_name": "Smith"}],
-        1,
-    )
     from knotch_mcp.tools import _find_contact_by_details
 
     result = await _find_contact_by_details(
         "John", "Smith", "Google", None, None, mock_apollo, mock_hubspot
     )
-    assert result.company == "Google"
-    assert result.match_method == "keyword_search"
+    assert result.company == "OpenAI"
+    assert result.match_method == "exact"
+    assert result.confidence == "medium"
+    assert any("company_changed" in w for w in result.warnings)
 
 
 @pytest.mark.asyncio
-async def test_company_mismatch_in_alternate_matches(
+async def test_thin_company_mismatch_continues_cascade(
     mock_apollo, mock_hubspot, mock_clay
 ):
-    """Wrong-company stash should appear in alternate_matches."""
-    wrong_company = _make_person(
-        first="John", last="Smith", org_name="OpenAI", domain="openai.com"
-    )
+    """Thin person at wrong company should stash and continue cascade."""
+    thin_wrong = {
+        "id": "abc123",
+        "first_name": "John",
+        "last_name": "Smith",
+        "title": None,
+        "organization": {"name": "OpenAI", "primary_domain": "openai.com"},
+        "email": None,
+        "email_status": None,
+        "linkedin_url": "https://linkedin.com/in/johnsmith",
+        "city": None,
+        "state": None,
+        "country": None,
+        "phone_numbers": [],
+    }
     call_count = 0
 
     async def match_side_effect(**kwargs):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            return wrong_company
+            return thin_wrong
         return None
 
     mock_apollo.people_match = AsyncMock(side_effect=match_side_effect)
@@ -632,8 +629,117 @@ async def test_company_mismatch_in_alternate_matches(
     result = await _find_contact_by_details(
         "John", "Smith", "Google", None, None, mock_apollo, mock_hubspot
     )
-    assert result.match_method is None
     assert result.confidence == "low"
+
+
+# ── Company-optional and QA tests ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_name_only_search_no_company(mock_apollo, mock_hubspot, mock_clay):
+    """Search with just a name and no company should work via keyword search."""
+    person = _make_person(first="Jane", last="Doe", org_name="Acme", domain="acme.com")
+    mock_apollo.people_match = AsyncMock(
+        side_effect=lambda **kw: person if kw.get("apollo_id") else None
+    )
+    mock_apollo.people_search.return_value = (
+        [{"id": "abc123", "first_name": "Jane", "last_name": "Doe"}],
+        1,
+    )
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Jane", "Doe", None, None, None, mock_apollo, mock_hubspot
+    )
+    assert result.name == "Jane Doe"
+    assert result.company == "Acme"
+    assert any("provide company" in a for a in result.suggested_actions)
+
+
+@pytest.mark.asyncio
+async def test_name_only_no_match_suggests_more_info(
+    mock_apollo, mock_hubspot, mock_clay
+):
+    """No-match with only a name should suggest providing company/email/linkedin."""
+    mock_apollo.people_match = AsyncMock(return_value=None)
+    mock_apollo.people_search.return_value = ([], 0)
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "John", "Doe", None, None, None, mock_apollo, mock_hubspot
+    )
+    assert result.confidence == "low"
+    actions_text = " ".join(result.suggested_actions)
+    assert "email" in actions_text
+    assert "LinkedIn" in actions_text
+    assert "company" in actions_text
+
+
+@pytest.mark.asyncio
+async def test_email_anchor_skips_company(mock_apollo, mock_hubspot, mock_clay):
+    """When email is provided without company, should find via email match."""
+    person = _make_person(
+        first="Alice", last="Wu", org_name="Stripe", domain="stripe.com"
+    )
+    mock_apollo.people_match = AsyncMock(return_value=person)
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Alice", "Wu", None, "alice@stripe.com", None, mock_apollo, mock_hubspot
+    )
+    assert result.name == "Alice Wu"
+    assert result.match_method == "exact"
+    assert result.confidence == "high"
+
+
+@pytest.mark.asyncio
+async def test_qa_flags_freemail(mock_apollo, mock_hubspot, mock_clay):
+    """QA should warn when contact uses a freemail provider."""
+    person = _make_person(first="Bob", last="Lee")
+    person["email"] = "bob.lee@gmail.com"
+    mock_apollo.people_match = AsyncMock(return_value=person)
+    mock_apollo.resolve_company_domains.return_value = [("Stripe", "stripe.com")]
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Bob", "Lee", "Stripe", None, None, mock_apollo, mock_hubspot
+    )
+    assert any("personal_email" in w for w in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_qa_specific_enrichment_actions(mock_apollo, mock_hubspot, mock_clay):
+    """QA should give specific enrichment suggestions with IDs and domains."""
+    person = _make_person(first="Eve", last="Park")
+    person["email"] = None
+    person["phone_numbers"] = []
+    mock_apollo.people_match = AsyncMock(return_value=person)
+    mock_apollo.resolve_company_domains.return_value = [("Stripe", "stripe.com")]
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Eve", "Park", "Stripe", None, None, mock_apollo, mock_hubspot
+    )
+    actions_text = " ".join(result.suggested_actions)
+    assert "clay_enrich for email" in actions_text
+    assert "stripe.com" in actions_text or "find_phone" in actions_text
+
+
+@pytest.mark.asyncio
+async def test_qa_company_changed_next_step(mock_apollo, mock_hubspot, mock_clay):
+    """Company-changed result should have specific next_step about confirming."""
+    person = _make_person(
+        first="Sam", last="Chen", org_name="NewCo", domain="newco.com"
+    )
+    mock_apollo.people_match = AsyncMock(return_value=person)
+    mock_apollo.resolve_company_domains.return_value = [("OldCo", "oldco.com")]
+    from knotch_mcp.tools import _find_contact_by_details
+
+    result = await _find_contact_by_details(
+        "Sam", "Chen", "OldCo", None, None, mock_apollo, mock_hubspot
+    )
+    assert "company_changed" in result.next_step
+    assert "Confirm" in result.next_step
 
 
 # ── Bug 3: find_contacts_by_role ──────────────────────────────────────
@@ -1209,33 +1315,23 @@ async def test_next_step_mentions_alternates_count(mock_apollo, mock_hubspot):
 
 
 @pytest.mark.asyncio
-async def test_no_match_surfaces_wrong_company_stash(mock_apollo, mock_hubspot):
-    """No-match path should surface wrong_company_stash as alternate."""
+async def test_no_match_surfaces_wrong_company_as_primary(mock_apollo, mock_hubspot):
+    """Non-thin person at wrong company should return as primary with company_changed warning."""
     wrong_co = _make_person(
         first="Jane", last="Smith", org_name="OpenAI", domain="openai.com"
     )
 
-    call_count = 0
-
-    async def match_side_effect(**kwargs):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return wrong_co
-        return None
-
-    mock_apollo.people_match = AsyncMock(side_effect=match_side_effect)
-    mock_apollo.people_search.return_value = ([], 0)
+    mock_apollo.people_match = AsyncMock(return_value=wrong_co)
     mock_apollo.resolve_company_domains.return_value = [("Google", "google.com")]
     from knotch_mcp.tools import _find_contact_by_details
 
     result = await _find_contact_by_details(
         "Jane", "Smith", "Google", None, None, mock_apollo, mock_hubspot
     )
-    assert result.alternate_matches is not None
-    assert len(result.alternate_matches) == 1
-    assert result.alternate_matches[0]["company"] == "OpenAI"
-    assert "lookup_contact" in result.next_step
+    assert result.company == "OpenAI"
+    assert result.confidence == "medium"
+    assert any("company_changed" in w for w in result.warnings)
+    assert "OpenAI" in result.warnings[0]
 
 
 # ── Clay field extraction tests ──────────────────────────────────
