@@ -140,7 +140,7 @@ def mock_hubspot():
                 "id": "default",
                 "label": "Sales Pipeline",
                 "stages": [
-                    {"id": "ipm", "label": "IPM Set", "metadata": {}},
+                    {"id": "ipm", "label": "IPM", "metadata": {}},
                     {
                         "id": "qualificationlead",
                         "label": "Qualification",
@@ -254,7 +254,7 @@ class TestResolveStageKey:
         assert _resolve_stage_key("Procurement") == "procurement"
 
     def test_ipm(self):
-        assert _resolve_stage_key("IPM Set") == "ipm"
+        assert _resolve_stage_key("IPM") == "ipm"
 
     def test_closed_won(self):
         assert _resolve_stage_key("Closed Won") is None

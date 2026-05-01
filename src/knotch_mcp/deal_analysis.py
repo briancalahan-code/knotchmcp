@@ -34,7 +34,7 @@ logger = get_logger("knotch_mcp.deal_analysis")
 
 STAGE_REQUIREMENTS: dict[str, dict] = {
     "ipm": {
-        "label": "IPM Set/Held",
+        "label": "IPM",
         "min_contacts": 1,
         "max_contacts": 2,
         "required_roles": [],
@@ -82,8 +82,6 @@ STAGE_REQUIREMENTS: dict[str, dict] = {
 }
 
 _STAGE_NAME_MAP: dict[str, str] = {
-    "ipm set": "ipm",
-    "ipm held": "ipm",
     "ipm": "ipm",
     "qualification": "qualification",
     "stage 1": "qualification",
