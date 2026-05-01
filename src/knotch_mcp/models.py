@@ -104,6 +104,8 @@ class FindContactsResult(BaseModel):
 
     candidates: list[ContactResult]
     total_available: int
+    warnings: list[str] = []
+    next_step: str | None = None
 
 
 class FindPhoneResult(BaseModel):
@@ -129,12 +131,13 @@ class EnrichContactResult(BaseModel):
 class AddToHubSpotResult(BaseModel):
     """Output for add_to_hubspot tool."""
 
-    hubspot_contact_id: str
-    hubspot_url: str
-    action: str
+    hubspot_contact_id: str = ""
+    hubspot_url: str = ""
+    action: str = ""
     company_associated: bool = False
     company_created: bool = False
     company_name: str | None = None
+    error: str | None = None
 
 
 class ClayEnrichResult(BaseModel):

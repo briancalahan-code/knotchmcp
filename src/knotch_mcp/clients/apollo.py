@@ -8,6 +8,13 @@ BASE_URL = "https://api.apollo.io/api/v1"
 TIMEOUT = 20.0
 
 
+class ApolloAPIError(Exception):
+    def __init__(self, status_code: int, message: str):
+        self.status_code = status_code
+        self.message = message
+        super().__init__(message)
+
+
 class ApolloClient:
     def __init__(self, api_key: str, rate_limiter: TokenBucket):
         self._api_key = api_key
@@ -17,8 +24,24 @@ class ApolloClient:
     async def _post(self, path: str, body: dict) -> dict:
         await self._rate_limiter.acquire()
         body["api_key"] = self._api_key
-        resp = await self._client.post(path, json=body)
-        resp.raise_for_status()
+        try:
+            resp = await self._client.post(path, json=body)
+            resp.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise ApolloAPIError(
+                0, "Apollo API request timed out — try again."
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            messages = {
+                400: "Apollo API bad request — check the input parameters.",
+                401: "Apollo API authentication failed — check the API key.",
+                403: "Apollo API access denied.",
+                404: "Apollo API resource not found.",
+                429: "Apollo API rate limit exceeded — wait and retry.",
+            }
+            msg = messages.get(status, f"Apollo API error (HTTP {status}).")
+            raise ApolloAPIError(status, msg) from exc
         return resp.json()
 
     async def people_match(
@@ -52,7 +75,12 @@ class ApolloClient:
             body["reveal_phone_number"] = True
         if reveal_personal_emails:
             body["reveal_personal_emails"] = True
-        data = await self._post("/people/match", body)
+        try:
+            data = await self._post("/people/match", body)
+        except ApolloAPIError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
         return data.get("person")
 
     async def people_search(

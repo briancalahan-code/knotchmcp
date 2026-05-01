@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 
-from knotch_mcp.clients.apollo import ApolloClient
+import httpx
+
+from knotch_mcp.clients.apollo import ApolloAPIError, ApolloClient
 from knotch_mcp.clients.clay import ClayClient
 from knotch_mcp.clients.hubspot import HubSpotClient
 from knotch_mcp.log import ToolLogContext, get_logger
@@ -26,6 +28,27 @@ from knotch_mcp.models import (
 )
 
 logger = get_logger("knotch_mcp.tools")
+
+
+# ── Error helpers ──────────────────────────────────────────────────
+
+
+def _friendly_hubspot_error(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        messages = {
+            400: "Invalid request — check property names and values.",
+            401: "Authentication failed — HubSpot token may be expired.",
+            403: "Permission denied — HubSpot token lacks access for this object.",
+            404: "Object not found in HubSpot — verify the ID is correct.",
+            409: "Conflict — this record may have been modified concurrently.",
+            429: "HubSpot rate limit hit — wait a moment and retry.",
+        }
+        return messages.get(status, f"HubSpot returned HTTP {status}.")
+    if isinstance(exc, httpx.TimeoutException):
+        return "HubSpot request timed out — try again."
+    return f"HubSpot error: {type(exc).__name__}"
+
 
 # ── Clay field extraction ────────────────────────────────────────
 
@@ -193,7 +216,7 @@ def _extract_contact(person: dict) -> ContactResult:
     """Convert an Apollo person dict into a ContactResult."""
     org = person.get("organization") or {}
     phone_numbers = person.get("phone_numbers") or []
-    phone = phone_numbers[0]["raw_number"] if phone_numbers else None
+    phone = phone_numbers[0].get("raw_number") if phone_numbers else None
     phone_type = phone_numbers[0].get("type") if phone_numbers else None
 
     city = person.get("city") or ""
@@ -504,6 +527,45 @@ async def _find_contact_by_details(
     def qa(contact: ContactResult) -> ContactResult:
         return _qa_result(contact, company, had_email, had_linkedin)
 
+    try:
+        return await _find_contact_by_details_inner(
+            first_name,
+            last_name,
+            company,
+            email,
+            linkedin_url,
+            apollo,
+            hubspot,
+            log_ctx,
+            qa,
+        )
+    except ApolloAPIError as exc:
+        logger.warning("Apollo error in find_contact_by_details: %s", exc)
+        return ContactResult(
+            name=f"{first_name} {last_name}",
+            company=company or None,
+            sources=[],
+            gaps=["api_error"],
+            confidence="low",
+            warnings=[f"Apollo API error: {exc.message}"],
+            next_step="Apollo is unavailable. Try again in a moment, or provide an email/LinkedIn URL for a direct HubSpot lookup.",
+        )
+
+
+async def _find_contact_by_details_inner(
+    first_name: str,
+    last_name: str,
+    company: str | None,
+    email: str | None,
+    linkedin_url: str | None,
+    apollo: ApolloClient,
+    hubspot: HubSpotClient,
+    log_ctx: ToolLogContext,
+    qa,
+) -> ContactResult:
+    had_email = bool(email)
+    had_linkedin = bool(linkedin_url)
+
     # ── Resolve company domain(s) ──
     if not company:
         domains: list[tuple[str, str]] = []
@@ -679,23 +741,59 @@ async def _find_contacts_by_role(
     if _is_domain(company):
         domain = company
     else:
-        domain = await apollo.resolve_company_domain(company)
+        try:
+            domain = await apollo.resolve_company_domain(company)
+        except ApolloAPIError as exc:
+            logger.warning("Apollo error resolving domain for %s: %s", company, exc)
+            return FindContactsResult(
+                candidates=[],
+                total_available=0,
+                warnings=[f"Apollo API error: {exc.message}"],
+                next_step="Apollo is unavailable. Try again, or provide the company domain directly (e.g. 'stripe.com').",
+            )
         log_ctx.add_api_call("apollo")
         if not domain:
             logger.warning("could not resolve domain for %s", company)
 
+    domain_warning: str | None = None
+    if not domain and not _is_domain(company):
+        domain_warning = f"Could not resolve domain for '{company}'. Results may include contacts from other companies with similar names."
+
     seniority_list = [seniority] if seniority else None
-    people_raw, total = await apollo.people_search(
-        titles=titles,
-        domain=domain,
-        seniority=seniority_list,
-        per_page=limit,
-    )
+    try:
+        people_raw, total = await apollo.people_search(
+            titles=titles,
+            domain=domain,
+            seniority=seniority_list,
+            per_page=limit,
+        )
+    except ApolloAPIError as exc:
+        logger.warning("Apollo search error: %s", exc)
+        return FindContactsResult(
+            candidates=[],
+            total_available=0,
+            warnings=[f"Apollo API error: {exc.message}"],
+            next_step="Apollo is unavailable. Try again in a moment.",
+        )
     log_ctx.add_api_call("apollo")
 
     if total == 0:
         logger.info("tool completed (no results)", extra=log_ctx.finish())
-        return FindContactsResult(candidates=[], total_available=0)
+        suggestions = [
+            "Try broader titles (e.g. 'Marketing' instead of 'Content Marketing Manager')."
+        ]
+        if seniority:
+            suggestions.append("Remove the seniority filter to widen the search.")
+        if not _is_domain(company):
+            suggestions.append(
+                f"Provide the exact domain (e.g. 'company.com') instead of '{company}'."
+            )
+        return FindContactsResult(
+            candidates=[],
+            total_available=0,
+            warnings=[domain_warning] if domain_warning else [],
+            next_step="No results found. " + " ".join(suggestions),
+        )
 
     async def enrich_one(person_stub: dict) -> ContactResult:
         person = await apollo.people_match(
@@ -741,7 +839,11 @@ async def _find_contacts_by_role(
             candidates = filtered
 
     logger.info("tool completed", extra=log_ctx.finish())
-    return FindContactsResult(candidates=candidates, total_available=total)
+    return FindContactsResult(
+        candidates=candidates,
+        total_available=total,
+        warnings=[domain_warning] if domain_warning else [],
+    )
 
 
 # ── Tool 3: find_phone ───────────────────────────────────────────────
@@ -755,6 +857,13 @@ async def _find_phone(
     apollo: ApolloClient,
 ) -> FindPhoneResult:
     """Apollo match with reveal_phone_number to find a direct dial."""
+    if not any([apollo_id, email, linkedin_url, name]):
+        return FindPhoneResult(
+            found=False,
+            source="apollo",
+            suggested_action="Provide at least one identifier: apollo_id, email, linkedin_url, or name.",
+        )
+
     log_ctx = ToolLogContext("find_phone")
 
     first_name = None
@@ -764,14 +873,22 @@ async def _find_phone(
         first_name = parts[0]
         last_name = parts[1] if len(parts) > 1 else None
 
-    person = await apollo.people_match(
-        apollo_id=apollo_id,
-        email=email,
-        linkedin_url=linkedin_url,
-        first_name=first_name,
-        last_name=last_name,
-        reveal_phone_number=True,
-    )
+    try:
+        person = await apollo.people_match(
+            apollo_id=apollo_id,
+            email=email,
+            linkedin_url=linkedin_url,
+            first_name=first_name,
+            last_name=last_name,
+            reveal_phone_number=True,
+        )
+    except ApolloAPIError as exc:
+        logger.warning("Apollo error in find_phone: %s", exc)
+        return FindPhoneResult(
+            found=False,
+            source="apollo",
+            suggested_action=f"Apollo error: {exc.message}. Try clay_enrich instead.",
+        )
     log_ctx.add_api_call("apollo")
 
     if not person:
@@ -785,7 +902,7 @@ async def _find_phone(
         phone = phone_numbers[0]
         logger.info("tool completed", extra=log_ctx.finish())
         return FindPhoneResult(
-            phone=phone["raw_number"],
+            phone=phone.get("raw_number"),
             phone_type=phone.get("type"),
             source="apollo",
             confidence="high" if len(phone_numbers) == 1 else "medium",
@@ -806,7 +923,18 @@ async def _lookup_contact(
 ) -> ContactResult:
     """Look up a single contact by Apollo ID, returning full data + HubSpot check."""
     log_ctx = ToolLogContext("lookup_contact")
-    person = await apollo.people_match(apollo_id=apollo_id)
+    try:
+        person = await apollo.people_match(apollo_id=apollo_id)
+    except ApolloAPIError as exc:
+        logger.warning("Apollo error in lookup_contact: %s", exc)
+        return ContactResult(
+            name="",
+            sources=[],
+            gaps=["api_error"],
+            confidence="low",
+            warnings=[f"Apollo API error: {exc.message}"],
+            next_step="Apollo is unavailable. Try again in a moment.",
+        )
     log_ctx.add_api_call("apollo")
 
     if not person or _is_phantom(person):
@@ -856,13 +984,17 @@ async def _enrich_contact(
     if not empty_fields:
         return EnrichContactResult(already_populated=populated_fields)
 
-    person = await apollo.people_match(
-        first_name=props.get("firstname"),
-        last_name=props.get("lastname"),
-        email=props.get("email"),
-        linkedin_url=props.get("hs_linkedin_url"),
-        reveal_phone_number=True,
-    )
+    try:
+        person = await apollo.people_match(
+            first_name=props.get("firstname"),
+            last_name=props.get("lastname"),
+            email=props.get("email"),
+            linkedin_url=props.get("hs_linkedin_url"),
+            reveal_phone_number=True,
+        )
+    except ApolloAPIError as exc:
+        logger.warning("Apollo error in enrich_contact, continuing with Clay: %s", exc)
+        person = None
     log_ctx.add_api_call("apollo")
     sources = ["apollo"]
 
@@ -897,7 +1029,18 @@ async def _enrich_contact(
     if still_missing and clay.configured:
         first = props.get("firstname", "")
         last = props.get("lastname", "")
-        domain = props.get("company", "")
+        domain = None
+        contact_email = filled.get("email") or props.get("email") or ""
+        if "@" in contact_email:
+            email_domain = contact_email.split("@")[1].lower()
+            if email_domain not in _FREEMAIL_DOMAINS:
+                domain = email_domain
+        if not domain and person:
+            domain = (person.get("organization") or {}).get("primary_domain")
+        if not domain:
+            company_val = props.get("company", "")
+            if "." in company_val:
+                domain = company_val
         linkedin = (
             filled.get("hs_linkedin_url")
             or props.get("hs_linkedin_url")
@@ -994,38 +1137,54 @@ async def _add_to_hubspot(
     if location:
         properties["city"] = location
 
-    if existing:
-        hs_id = existing[0]["id"]
-        await hubspot.update_contact(hs_id, properties)
-        action = "updated"
-    else:
-        result = await hubspot.create_contact(properties)
-        hs_id = result["id"]
-        action = "created"
+    try:
+        if existing:
+            hs_id = existing[0].get("id")
+            if not hs_id:
+                return AddToHubSpotResult(
+                    error="HubSpot returned a contact without an ID."
+                )
+            await hubspot.update_contact(hs_id, properties)
+            action = "updated"
+        else:
+            result = await hubspot.create_contact(properties)
+            hs_id = result.get("id")
+            if not hs_id:
+                return AddToHubSpotResult(
+                    error="HubSpot created a contact but returned no ID."
+                )
+            action = "created"
+    except Exception as exc:
+        logger.warning("add_to_hubspot create/update failed: %s", exc)
+        return AddToHubSpotResult(error=_friendly_hubspot_error(exc))
     log_ctx.add_api_call("hubspot")
 
     company_associated = False
     company_created = False
     company_name = None
     if company_domain:
-        companies = await hubspot.search_companies_by_domain(company_domain)
-        log_ctx.add_api_call("hubspot")
-        if companies:
-            company_id = companies[0]["id"]
-            company_name = companies[0].get("properties", {}).get("name")
-        else:
-            company_props: dict[str, str] = {"domain": company_domain}
-            if company:
-                company_props["name"] = company
-            new_company = await hubspot.create_company(company_props)
+        try:
+            companies = await hubspot.search_companies_by_domain(company_domain)
             log_ctx.add_api_call("hubspot")
-            company_id = new_company["id"]
-            company_name = company
-            company_created = True
+            if companies:
+                company_id = companies[0].get("id")
+                company_name = companies[0].get("properties", {}).get("name")
+            else:
+                company_props: dict[str, str] = {"domain": company_domain}
+                if company:
+                    company_props["name"] = company
+                new_company = await hubspot.create_company(company_props)
+                log_ctx.add_api_call("hubspot")
+                company_id = new_company.get("id")
+                company_name = company
+                company_created = True
 
-        await hubspot.associate_contact_to_company(hs_id, company_id)
-        log_ctx.add_api_call("hubspot")
-        company_associated = True
+            if company_id:
+                await hubspot.associate_contact_to_company(hs_id, company_id)
+                log_ctx.add_api_call("hubspot")
+                company_associated = True
+        except Exception as exc:
+            logger.warning("company association failed: %s", exc)
 
     logger.info("tool completed", extra=log_ctx.finish())
     return AddToHubSpotResult(

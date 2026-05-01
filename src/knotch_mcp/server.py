@@ -44,10 +44,40 @@ _hubspot = HubSpotClient(
 )
 
 
+_NULL_SENTINELS = frozenset(
+    {
+        "null",
+        "none",
+        "n/a",
+        "na",
+        "unknown",
+        "undefined",
+        "-",
+        "--",
+        "not available",
+        "not provided",
+    }
+)
+
+
 def _clean(val: str) -> str | None:
-    if not val or val.lower() == "null":
+    if not val:
         return None
-    return val
+    stripped = val.strip()
+    if not stripped or stripped.lower() in _NULL_SENTINELS:
+        return None
+    return stripped
+
+
+def _validate_name(first_name: str, last_name: str) -> dict | None:
+    first_name = first_name.strip()
+    last_name = last_name.strip()
+    if not first_name or not last_name:
+        return {
+            "error": "first_name and last_name are required and cannot be empty.",
+            "suggestion": "Provide the person's full name to search.",
+        }
+    return None
 
 
 @mcp.tool()
@@ -73,6 +103,9 @@ async def find_contact_by_details(
     - hubspot_status is not_found → offer to add to HubSpot
     - suggested_actions has enrichment items → offer Clay/phone lookup for gaps
     Do NOT skip steps or auto-proceed — always confirm with the user."""
+    err = _validate_name(first_name, last_name)
+    if err:
+        return err
     result = await _find_contact_by_details(
         first_name,
         last_name,
@@ -158,6 +191,9 @@ async def add_to_hubspot(
     if found, creates if new. Creates the company in HubSpot if it doesn't exist
     yet, then associates the contact to the company. Always pass company_domain
     when available so the company association works."""
+    err = _validate_name(first_name, last_name)
+    if err:
+        return err
     result = await _add_to_hubspot(
         first_name,
         last_name,
@@ -186,6 +222,12 @@ async def clay_enrich(
     arrives in time, returns the enriched data directly. If it times out, returns
     a correlationId — use check_clay_result to retrieve the data later.
     requested_data options: phone, email. Pass linkedin_url if available."""
+    company_domain_clean = company_domain.strip()
+    if not company_domain_clean:
+        return {
+            "error": "company_domain is required for Clay enrichment.",
+            "suggestion": "Provide the company's domain (e.g., 'stripe.com').",
+        }
     data = requested_data or ["phone", "email"]
     result = await _clay_enrich(
         first_name,

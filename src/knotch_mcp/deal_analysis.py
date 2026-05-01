@@ -257,37 +257,36 @@ async def _deal_analysis(
     company_id = _extract_ids(company_assoc)[:1]  # just the first
 
     # ── Phase 3: Parallel — batch reads + company + other deals + per-item associations ──
-    tasks: dict[str, asyncio.Task] = {}
+    coros: dict[str, any] = {}
 
-    async with asyncio.TaskGroup() as tg:
-        if deal_contact_ids:
-            tasks["contacts"] = tg.create_task(
-                hubspot.batch_read(
-                    "contacts", deal_contact_ids, DEAL_CONTACT_PROPERTIES
-                )
+    if deal_contact_ids:
+        coros["contacts"] = hubspot.batch_read(
+            "contacts", deal_contact_ids, DEAL_CONTACT_PROPERTIES
+        )
+    if meeting_ids:
+        coros["meetings"] = hubspot.batch_read(
+            "meetings", meeting_ids, MEETING_PROPERTIES
+        )
+        for mid in meeting_ids:
+            coros[f"mtg_assoc_{mid}"] = hubspot.get_associations(
+                "meetings", mid, "contacts"
             )
-        if meeting_ids:
-            tasks["meetings"] = tg.create_task(
-                hubspot.batch_read("meetings", meeting_ids, MEETING_PROPERTIES)
+    if email_ids:
+        recent_email_ids = email_ids[:30]
+        coros["emails"] = hubspot.batch_read(
+            "emails", recent_email_ids, EMAIL_PROPERTIES
+        )
+        for eid in recent_email_ids:
+            coros[f"email_assoc_{eid}"] = hubspot.get_associations(
+                "emails", eid, "contacts"
             )
-            for mid in meeting_ids:
-                tasks[f"mtg_assoc_{mid}"] = tg.create_task(
-                    hubspot.get_associations("meetings", mid, "contacts")
-                )
-        if email_ids:
-            recent_email_ids = email_ids[:30]
-            tasks["emails"] = tg.create_task(
-                hubspot.batch_read("emails", recent_email_ids, EMAIL_PROPERTIES)
-            )
-            for eid in recent_email_ids:
-                tasks[f"email_assoc_{eid}"] = tg.create_task(
-                    hubspot.get_associations("emails", eid, "contacts")
-                )
-        if company_id:
-            tasks["company"] = tg.create_task(hubspot.get_company(company_id[0]))
-            tasks["other_deals"] = tg.create_task(
-                hubspot.search_deals_by_company(company_id[0])
-            )
+    if company_id:
+        coros["company"] = hubspot.get_company(company_id[0])
+        coros["other_deals"] = hubspot.search_deals_by_company(company_id[0])
+
+    keys = list(coros.keys())
+    results = await asyncio.gather(*coros.values(), return_exceptions=True)
+    tasks = dict(zip(keys, results))
 
     # ── Unpack results ──
     contact_records = _task_result(tasks, "contacts", [])
@@ -438,6 +437,14 @@ async def _deal_analysis(
         warnings.append(
             f"Contact count ({len(deal_contacts)}) is below stage minimum ({min_contacts})."
         )
+    if not meetings and not is_closed:
+        warnings.append(
+            "No meetings recorded on this deal — meetings may not be associated or logged."
+        )
+    if not emails and not is_closed:
+        warnings.append(
+            "No emails recorded on this deal — emails may not be associated or logged."
+        )
 
     logger.info("tool completed", extra=log_ctx.finish())
     return DealAnalysisResult(
@@ -475,14 +482,18 @@ def _extract_ids(assoc_list: list[dict]) -> list[str]:
     ]
 
 
-def _task_result(tasks: dict[str, asyncio.Task], key: str, default):
-    task = tasks.get(key)
-    if task is None:
+def _task_result(tasks: dict, key: str, default):
+    result = tasks.get(key)
+    if result is None:
         return default
-    try:
-        return task.result()
-    except Exception:
+    if isinstance(result, BaseException):
         return default
+    if isinstance(result, asyncio.Task):
+        try:
+            return result.result()
+        except Exception:
+            return default
+    return result
 
 
 async def _safe_get_owner_emails(
