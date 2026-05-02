@@ -12,8 +12,6 @@ from knotch_mcp.models import OwnerActivity, TeamActivityResult
 
 logger = get_logger("knotch_mcp.team_activity")
 
-_TOOL_VERSION = "d530a5d"
-
 DEFAULT_PIPELINE = "72018330"
 
 
@@ -24,17 +22,15 @@ async def _fetch_owner_activity(
     pipeline_id: str,
     hubspot: HubSpotClient,
     log_ctx: ToolLogContext,
-) -> tuple[OwnerActivity, set[str], set[str], dict]:
+) -> tuple[OwnerActivity, set[str], set[str]]:
     """Fetch all activity metrics for one owner.
 
-    Returns (activity, company_ids, contact_ids, ipm_debug) so the caller can
+    Returns (activity, company_ids, contact_ids) so the caller can
     union-dedup company/contact sets across owners for the team totals.
     """
     oid = str(owner_id)
-    ipm_debug: dict = {}
 
-    # HubSpot CRM Search API requires epoch ms for date properties,
-    # even though ipm_held displays as YYYY-MM-DD.
+    # HubSpot CRM Search API requires epoch ms for date properties.
     start_dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
@@ -45,18 +41,6 @@ async def _fetch_owner_activity(
     end_date_ms = str(int(end_dt.timestamp() * 1000))
 
     # ── Phase 1: parallel searches for emails, meetings, IPM deals ──
-    ipm_filters = [
-        {"propertyName": "pipeline", "operator": "EQ", "value": pipeline_id},
-        {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": oid},
-        {"propertyName": "ipm_held", "operator": "GTE", "value": start_date_ms},
-        {"propertyName": "ipm_held", "operator": "LTE", "value": end_date_ms},
-    ]
-    ipm_debug["filters"] = ipm_filters
-    ipm_debug["start_date_ms"] = start_date_ms
-    ipm_debug["end_date_ms"] = end_date_ms
-    ipm_debug["start_date_human"] = start_dt.strftime("%Y-%m-%d")
-    ipm_debug["end_date_human"] = end_dt.strftime("%Y-%m-%d")
-
     search_results = await asyncio.gather(
         hubspot.search_paginated(
             "emails",
@@ -105,7 +89,28 @@ async def _fetch_owner_activity(
         ),
         hubspot.search_paginated(
             "deals",
-            ipm_filters,
+            [
+                {
+                    "propertyName": "pipeline",
+                    "operator": "EQ",
+                    "value": pipeline_id,
+                },
+                {
+                    "propertyName": "hubspot_owner_id",
+                    "operator": "EQ",
+                    "value": oid,
+                },
+                {
+                    "propertyName": "ipm_held",
+                    "operator": "GTE",
+                    "value": start_date_ms,
+                },
+                {
+                    "propertyName": "ipm_held",
+                    "operator": "LTE",
+                    "value": end_date_ms,
+                },
+            ],
             properties=["dealname", "ipm_held", "hubspot_owner_id"],
         ),
         return_exceptions=True,
@@ -121,20 +126,8 @@ async def _fetch_owner_activity(
             logger.warning(
                 "%s search failed for owner %s: %s", name, oid, search_results[i]
             )
-            if name == "ipms":
-                exc = search_results[i]
-                ipm_debug["error"] = str(exc)
-                ipm_debug["error_type"] = type(exc).__name__
-                if hasattr(exc, "response"):
-                    try:
-                        ipm_debug["response_body"] = exc.response.text[:500]
-                        ipm_debug["status_code"] = exc.response.status_code
-                    except Exception:
-                        ipm_debug["response_body"] = "(could not read)"
         else:
             target.extend(search_results[i])
-            if name == "ipms":
-                ipm_debug["result_count"] = len(search_results[i])
         log_ctx.add_api_call("hubspot")
 
     email_ids = [e["id"] for e in emails]
@@ -179,7 +172,6 @@ async def _fetch_owner_activity(
         ),
         company_ids,
         contact_ids,
-        ipm_debug,
     )
 
 
@@ -208,27 +200,19 @@ async def _team_activity(
     total_emails = 0
     total_meetings = 0
     total_ipms = 0
-    debug_info: dict = {"pipeline": pipeline}
-    first_ipm_debug_captured = False
 
     for oid, result in zip(owner_ids, results):
         if isinstance(result, BaseException):
             logger.warning("owner %s failed: %s", oid, result)
             by_owner[str(oid)] = OwnerActivity()
-            if not first_ipm_debug_captured:
-                debug_info["first_owner_error"] = str(result)
-                first_ipm_debug_captured = True
             continue
-        activity, companies, contacts, ipm_debug = result
+        activity, companies, contacts = result
         by_owner[str(oid)] = activity
         all_companies |= companies
         all_contacts |= contacts
         total_emails += activity.emails
         total_meetings += activity.meetings
         total_ipms += activity.ipms_held
-        if not first_ipm_debug_captured:
-            debug_info["ipm_sample"] = ipm_debug
-            first_ipm_debug_captured = True
 
     team = OwnerActivity(
         emails=total_emails,
@@ -244,6 +228,4 @@ async def _team_activity(
         by_owner=by_owner,
         window={"start_ms": start_ms, "end_ms": end_ms},
         generated_at_ms=int(time.time() * 1000),
-        tool_version=_TOOL_VERSION,
-        ipm_debug=debug_info,
     )
