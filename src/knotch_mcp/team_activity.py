@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import time
 from datetime import datetime, timezone
 
@@ -11,6 +12,17 @@ from knotch_mcp.log import ToolLogContext, get_logger
 from knotch_mcp.models import OwnerActivity, TeamActivityResult
 
 logger = get_logger("knotch_mcp.team_activity")
+
+try:
+    _TOOL_VERSION = (
+        subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL
+        )
+        .decode()
+        .strip()
+    )
+except Exception:
+    _TOOL_VERSION = "unknown"
 
 DEFAULT_PIPELINE = "72018330"
 
@@ -38,6 +50,14 @@ async def _fetch_owner_activity(
     )
 
     # ── Phase 1: parallel searches for emails, meetings, IPM deals ──
+    ipm_filters = [
+        {"propertyName": "pipeline", "operator": "EQ", "value": pipeline_id},
+        {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": oid},
+        {"propertyName": "ipm_held", "operator": "GTE", "value": start_date},
+        {"propertyName": "ipm_held", "operator": "LTE", "value": end_date},
+    ]
+    logger.info("IPM filter for owner %s: %s", oid, ipm_filters)
+
     search_results = await asyncio.gather(
         hubspot.search_paginated(
             "emails",
@@ -84,31 +104,7 @@ async def _fetch_owner_activity(
                 },
             ],
         ),
-        hubspot.search_paginated(
-            "deals",
-            [
-                {
-                    "propertyName": "pipeline",
-                    "operator": "EQ",
-                    "value": pipeline_id,
-                },
-                {
-                    "propertyName": "hubspot_owner_id",
-                    "operator": "EQ",
-                    "value": oid,
-                },
-                {
-                    "propertyName": "ipm_held",
-                    "operator": "GTE",
-                    "value": start_date,
-                },
-                {
-                    "propertyName": "ipm_held",
-                    "operator": "LTE",
-                    "value": end_date,
-                },
-            ],
-        ),
+        hubspot.search_paginated("deals", ipm_filters),
         return_exceptions=True,
     )
 
@@ -124,6 +120,10 @@ async def _fetch_owner_activity(
             )
         else:
             target.extend(search_results[i])
+            if name == "ipms":
+                logger.info(
+                    "IPM results for owner %s: %d deals", oid, len(search_results[i])
+                )
         log_ctx.add_api_call("hubspot")
 
     email_ids = [e["id"] for e in emails]
@@ -224,4 +224,5 @@ async def _team_activity(
         by_owner=by_owner,
         window={"start_ms": start_ms, "end_ms": end_ms},
         generated_at_ms=int(time.time() * 1000),
+        tool_version=_TOOL_VERSION,
     )
