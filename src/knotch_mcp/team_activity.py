@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-import traceback
 from datetime import datetime, timezone
 
 from knotch_mcp.clients.hubspot import HubSpotClient
@@ -13,7 +12,7 @@ from knotch_mcp.models import OwnerActivity, TeamActivityResult
 
 logger = get_logger("knotch_mcp.team_activity")
 
-_TOOL_VERSION = "1fca701"
+_TOOL_VERSION = "4883601"
 
 DEFAULT_PIPELINE = "72018330"
 
@@ -113,11 +112,15 @@ async def _fetch_owner_activity(
                 "%s search failed for owner %s: %s", name, oid, search_results[i]
             )
             if name == "ipms":
-                ipm_debug["error"] = str(search_results[i])
-                ipm_debug["error_type"] = type(search_results[i]).__name__
-                ipm_debug["traceback"] = traceback.format_exception(search_results[i])[
-                    -3:
-                ]
+                exc = search_results[i]
+                ipm_debug["error"] = str(exc)
+                ipm_debug["error_type"] = type(exc).__name__
+                if hasattr(exc, "response"):
+                    try:
+                        ipm_debug["response_body"] = exc.response.text[:500]
+                        ipm_debug["status_code"] = exc.response.status_code
+                    except Exception:
+                        ipm_debug["response_body"] = "(could not read)"
         else:
             target.extend(search_results[i])
             if name == "ipms":
