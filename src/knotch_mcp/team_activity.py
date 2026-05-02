@@ -12,7 +12,7 @@ from knotch_mcp.models import OwnerActivity, TeamActivityResult
 
 logger = get_logger("knotch_mcp.team_activity")
 
-_TOOL_VERSION = "4883601"
+_TOOL_VERSION = "3560934"
 
 DEFAULT_PIPELINE = "72018330"
 
@@ -50,6 +50,11 @@ async def _fetch_owner_activity(
     ipm_debug["filters"] = ipm_filters
     ipm_debug["start_date"] = start_date
     ipm_debug["end_date"] = end_date
+    ipm_debug["request_body"] = {
+        "filterGroups": [{"filters": ipm_filters}],
+        "properties": ["dealname", "ipm_held", "hubspot_owner_id"],
+        "limit": 100,
+    }
 
     search_results = await asyncio.gather(
         hubspot.search_paginated(
@@ -97,7 +102,11 @@ async def _fetch_owner_activity(
                 },
             ],
         ),
-        hubspot.search_paginated("deals", ipm_filters),
+        hubspot.search_paginated(
+            "deals",
+            ipm_filters,
+            properties=["dealname", "ipm_held", "hubspot_owner_id"],
+        ),
         return_exceptions=True,
     )
 
