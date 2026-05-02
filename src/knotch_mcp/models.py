@@ -250,6 +250,7 @@ class TeamActivityResult(BaseModel):
     window: dict[str, int] = {}
     generated_at_ms: int = 0
     tool_version: str = ""
+    ipm_debug: dict = {}
     error: str | None = None
 
 

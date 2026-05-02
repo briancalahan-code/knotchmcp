@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
 import time
+import traceback
 from datetime import datetime, timezone
 
 from knotch_mcp.clients.hubspot import HubSpotClient
@@ -13,16 +13,7 @@ from knotch_mcp.models import OwnerActivity, TeamActivityResult
 
 logger = get_logger("knotch_mcp.team_activity")
 
-try:
-    _TOOL_VERSION = (
-        subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL
-        )
-        .decode()
-        .strip()
-    )
-except Exception:
-    _TOOL_VERSION = "unknown"
+_TOOL_VERSION = "1fca701"
 
 DEFAULT_PIPELINE = "72018330"
 
@@ -34,13 +25,14 @@ async def _fetch_owner_activity(
     pipeline_id: str,
     hubspot: HubSpotClient,
     log_ctx: ToolLogContext,
-) -> tuple[OwnerActivity, set[str], set[str]]:
+) -> tuple[OwnerActivity, set[str], set[str], dict]:
     """Fetch all activity metrics for one owner.
 
-    Returns (activity, company_ids, contact_ids) so the caller can
+    Returns (activity, company_ids, contact_ids, ipm_debug) so the caller can
     union-dedup company/contact sets across owners for the team totals.
     """
     oid = str(owner_id)
+    ipm_debug: dict = {}
 
     start_date = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).strftime(
         "%Y-%m-%d"
@@ -56,7 +48,9 @@ async def _fetch_owner_activity(
         {"propertyName": "ipm_held", "operator": "GTE", "value": start_date},
         {"propertyName": "ipm_held", "operator": "LTE", "value": end_date},
     ]
-    logger.info("IPM filter for owner %s: %s", oid, ipm_filters)
+    ipm_debug["filters"] = ipm_filters
+    ipm_debug["start_date"] = start_date
+    ipm_debug["end_date"] = end_date
 
     search_results = await asyncio.gather(
         hubspot.search_paginated(
@@ -118,12 +112,16 @@ async def _fetch_owner_activity(
             logger.warning(
                 "%s search failed for owner %s: %s", name, oid, search_results[i]
             )
+            if name == "ipms":
+                ipm_debug["error"] = str(search_results[i])
+                ipm_debug["error_type"] = type(search_results[i]).__name__
+                ipm_debug["traceback"] = traceback.format_exception(search_results[i])[
+                    -3:
+                ]
         else:
             target.extend(search_results[i])
             if name == "ipms":
-                logger.info(
-                    "IPM results for owner %s: %d deals", oid, len(search_results[i])
-                )
+                ipm_debug["result_count"] = len(search_results[i])
         log_ctx.add_api_call("hubspot")
 
     email_ids = [e["id"] for e in emails]
@@ -168,6 +166,7 @@ async def _fetch_owner_activity(
         ),
         company_ids,
         contact_ids,
+        ipm_debug,
     )
 
 
@@ -196,19 +195,27 @@ async def _team_activity(
     total_emails = 0
     total_meetings = 0
     total_ipms = 0
+    debug_info: dict = {"pipeline": pipeline}
+    first_ipm_debug_captured = False
 
     for oid, result in zip(owner_ids, results):
         if isinstance(result, BaseException):
             logger.warning("owner %s failed: %s", oid, result)
             by_owner[str(oid)] = OwnerActivity()
+            if not first_ipm_debug_captured:
+                debug_info["first_owner_error"] = str(result)
+                first_ipm_debug_captured = True
             continue
-        activity, companies, contacts = result
+        activity, companies, contacts, ipm_debug = result
         by_owner[str(oid)] = activity
         all_companies |= companies
         all_contacts |= contacts
         total_emails += activity.emails
         total_meetings += activity.meetings
         total_ipms += activity.ipms_held
+        if not first_ipm_debug_captured:
+            debug_info["ipm_sample"] = ipm_debug
+            first_ipm_debug_captured = True
 
     team = OwnerActivity(
         emails=total_emails,
@@ -225,4 +232,5 @@ async def _team_activity(
         window={"start_ms": start_ms, "end_ms": end_ms},
         generated_at_ms=int(time.time() * 1000),
         tool_version=_TOOL_VERSION,
+        ipm_debug=debug_info,
     )
