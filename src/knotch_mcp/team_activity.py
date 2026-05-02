@@ -12,7 +12,7 @@ from knotch_mcp.models import OwnerActivity, TeamActivityResult
 
 logger = get_logger("knotch_mcp.team_activity")
 
-_TOOL_VERSION = "10c21f1"
+_TOOL_VERSION = "d530a5d"
 
 DEFAULT_PIPELINE = "72018330"
 
@@ -33,23 +33,29 @@ async def _fetch_owner_activity(
     oid = str(owner_id)
     ipm_debug: dict = {}
 
-    start_date = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).strftime(
-        "%Y-%m-%d"
+    # HubSpot CRM Search API requires epoch ms for date properties,
+    # even though ipm_held displays as YYYY-MM-DD.
+    start_dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
     )
-    end_date = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).strftime(
-        "%Y-%m-%d"
+    end_dt = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
     )
+    start_date_ms = str(int(start_dt.timestamp() * 1000))
+    end_date_ms = str(int(end_dt.timestamp() * 1000))
 
     # ── Phase 1: parallel searches for emails, meetings, IPM deals ──
     ipm_filters = [
         {"propertyName": "pipeline", "operator": "EQ", "value": pipeline_id},
         {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": oid},
-        {"propertyName": "ipm_held", "operator": "GTE", "value": start_date},
-        {"propertyName": "ipm_held", "operator": "LTE", "value": end_date},
+        {"propertyName": "ipm_held", "operator": "GTE", "value": start_date_ms},
+        {"propertyName": "ipm_held", "operator": "LTE", "value": end_date_ms},
     ]
     ipm_debug["filters"] = ipm_filters
-    ipm_debug["start_date"] = start_date
-    ipm_debug["end_date"] = end_date
+    ipm_debug["start_date_ms"] = start_date_ms
+    ipm_debug["end_date_ms"] = end_date_ms
+    ipm_debug["start_date_human"] = start_dt.strftime("%Y-%m-%d")
+    ipm_debug["end_date_human"] = end_dt.strftime("%Y-%m-%d")
 
     search_results = await asyncio.gather(
         hubspot.search_paginated(
