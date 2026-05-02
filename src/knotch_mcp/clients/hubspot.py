@@ -327,6 +327,37 @@ class HubSpotClient:
             ],
         )
 
+    # ── Paginated search ─────────────────────────────────────────────
+
+    async def search_paginated(
+        self,
+        object_type: str,
+        filters: list[dict],
+        properties: list[str] | None = None,
+    ) -> list[dict]:
+        """Paginated search returning all matching results (up to HubSpot's 10K cap)."""
+        results: list[dict] = []
+        after: str | None = None
+        while True:
+            body: dict = {
+                "filterGroups": [{"filters": filters}],
+                "limit": 100,
+            }
+            if properties:
+                body["properties"] = properties
+            if after:
+                body["after"] = after
+            resp = await self._request_with_retry(
+                "POST", f"/crm/v3/objects/{object_type}/search", json=body
+            )
+            data = resp.json()
+            results.extend(data.get("results", []))
+            paging = data.get("paging", {}).get("next", {})
+            after = paging.get("after")
+            if not after:
+                break
+        return results
+
     # ── Batch methods ─────────────────────────────────────────────────
 
     async def batch_read(
@@ -348,6 +379,31 @@ class HubSpotClient:
             )
             results.extend(resp.json().get("results", []))
         return results
+
+    async def batch_get_associated_ids(
+        self,
+        from_type: str,
+        to_type: str,
+        ids: list[str],
+    ) -> set[str]:
+        """Batch read associations, returning the unique set of target object IDs."""
+        if not ids:
+            return set()
+        target_ids: set[str] = set()
+        for i in range(0, len(ids), 100):
+            chunk = ids[i : i + 100]
+            body = {"inputs": [{"id": oid} for oid in chunk]}
+            resp = await self._request_with_retry(
+                "POST",
+                f"/crm/v4/associations/{from_type}/{to_type}/batch/read",
+                json=body,
+            )
+            for result in resp.json().get("results", []):
+                for assoc in result.get("to", []):
+                    aid = assoc.get("toObjectId") or assoc.get("id")
+                    if aid:
+                        target_ids.add(str(aid))
+        return target_ids
 
     # ── Owner methods ────────────────────────────────────────────────
 

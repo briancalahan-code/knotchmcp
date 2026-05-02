@@ -232,6 +232,29 @@ class DealAnalysisResult(BaseModel):
 # ── Write Tool Results ────────────────────────────────────────────
 
 
+class OwnerActivity(BaseModel):
+    """Activity counts for a single HubSpot owner."""
+
+    emails: int = 0
+    meetings: int = 0
+    ipms_held: int = 0
+    accounts_touched: int = 0
+    people_touched: int = 0
+
+
+class TeamActivityResult(BaseModel):
+    """Aggregated team activity with per-owner breakdown."""
+
+    team: OwnerActivity = OwnerActivity()
+    by_owner: dict[str, OwnerActivity] = {}
+    window: dict[str, int] = {}
+    generated_at_ms: int = 0
+    error: str | None = None
+
+
+# ── Write Tool Results ────────────────────────────────────────────
+
+
 class UpdateResult(BaseModel):
     object_type: str
     object_id: str

@@ -9,6 +9,7 @@ from knotch_mcp.config import Settings
 from knotch_mcp.log import get_logger
 from knotch_mcp.rate_limit import TokenBucket
 from knotch_mcp.deal_analysis import _deal_analysis
+from knotch_mcp.team_activity import _team_activity
 from knotch_mcp.tools import (
     _add_to_hubspot,
     _associate_contact_to_deal,
@@ -349,4 +350,25 @@ async def associate_contact_to_deal(contact_id: str, deal_id: str) -> dict:
     identifies contacts who attended meetings or appeared in emails but aren't
     on the deal yet."""
     result = await _associate_contact_to_deal(contact_id, deal_id, _hubspot)
+    return result.model_dump()
+
+
+@mcp.tool()
+async def team_activity(
+    start_ms: int,
+    end_ms: int,
+    owner_ids: list[int],
+    pipeline_id: str = "",
+) -> dict:
+    """Aggregate team activity metrics in a single server-side call.
+    Returns email count, meeting count, IPMs held, accounts touched, and
+    people touched — both as team totals (union-deduped) and per-owner
+    breakdowns. Replaces dozens of individual HubSpot queries.
+
+    owner_ids: HubSpot owner IDs to scope to.
+    start_ms / end_ms: window as epoch milliseconds (UTC).
+    pipeline_id: HubSpot pipeline for IPM filter (default: New/Expansion)."""
+    result = await _team_activity(
+        start_ms, end_ms, owner_ids, pipeline_id or None, _hubspot
+    )
     return result.model_dump()
